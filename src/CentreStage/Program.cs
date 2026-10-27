@@ -31,8 +31,10 @@ internal static class Program
         var inspect = args.Contains("--inspect");
         var capture = GetOption(args, "--capture");
         var frames = int.TryParse(GetOption(args, "--frames"), out var f) ? Math.Max(f, 1) : 3;
-        var path = args.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal)
-            && !IsOptionValue(args, a, "--capture", "--frames"));
+        var anim = int.TryParse(GetOption(args, "--anim"), out var a) ? a : 0;
+        var time = float.TryParse(GetOption(args, "--time"), out var t) ? t : 0f;
+        var path = args.FirstOrDefault(x => !x.StartsWith("--", StringComparison.Ordinal)
+            && !IsOptionValue(args, x, "--capture", "--frames", "--anim", "--time"));
         if (path is null)
         {
             Console.Error.WriteLine("error: no model path given.");
@@ -66,7 +68,7 @@ internal static class Program
                 return;
             }
 
-            RunCapture(path, model, capture!, frames);
+            RunCapture(path, model, capture!, frames, anim, time);
             return;
         }
 
@@ -76,6 +78,36 @@ internal static class Program
     private static void Inspect(string path, GltfModel model)
     {
         {
+            if (model.Animations.Count > 0)
+            {
+                Console.WriteLine($"  animations: {model.Animations.Count}");
+                for (var ai = 0; ai < model.Animations.Count; ai++)
+                {
+                    var anim = model.Animations[ai];
+                    var paths = string.Join(", ", anim.Channels
+                        .GroupBy(c => c.Path)
+                        .Select(g => $"{g.Key} x{g.Count()}"));
+                    var modes = string.Join(", ", anim.Samplers
+                        .Select(s => s.Interpolation)
+                        .Distinct());
+                    Console.WriteLine(
+                        $"    [{ai}] '{anim.Name ?? "(unnamed)"}' duration={anim.Duration:F2}s channels={anim.Channels.Count} ({paths}) interpolation={modes}");
+                }
+            }
+            else
+            {
+                Console.WriteLine("  animations: none");
+            }
+
+            if (model.Skins.Count > 0)
+            {
+                Console.WriteLine($"  skins: {model.Skins.Count}");
+                for (var si = 0; si < model.Skins.Count; si++)
+                {
+                    Console.WriteLine($"    [{si}] '{model.Skins[si].Name ?? "(unnamed)"}' joints={model.Skins[si].JointNodes.Count}");
+                }
+            }
+
             Console.WriteLine($"  nodes walked: {model.Nodes.Count} of {model.Root.Nodes?.Count ?? 0}");
             var meshNodes = model.Nodes.Where(n => n.MeshIndex >= 0).ToList();
             Console.WriteLine($"  nodes carrying meshes: {meshNodes.Count}");
@@ -186,6 +218,7 @@ internal static class Program
         Console.WriteLine($"  materials:  {model.Materials.Count}");
         Console.WriteLine($"  textures:   {model.Textures.Count}");
         Console.WriteLine($"  lights:     {model.Lights.Count}");
+        Console.WriteLine($"  animations: {model.Animations.Count}");
         if (model.IgnoredExtensions.Count > 0)
         {
             Console.WriteLine($"  extensions not honoured (model loads regardless): {string.Join(", ", model.IgnoredExtensions)}");
@@ -196,7 +229,7 @@ internal static class Program
     /// Offscreen render: hidden window, draw a few frames, read the framebuffer to a PNG.
     /// Used for verification without putting windows on any display.
     /// </summary>
-    private static unsafe void RunCapture(string path, GltfModel model, string outputPath, int frames)
+    private static unsafe void RunCapture(string path, GltfModel model, string outputPath, int frames, int animIndex = 0, float time = 0f)
     {
         var options = WindowOptions.Default with
         {
@@ -210,6 +243,7 @@ internal static class Program
         var window = Window.Create(options);
         GL? gl = null;
         Renderer? renderer = null;
+        ScenePose? pose = null;
         var camera = new OrbitCamera();
         var remaining = frames;
 
@@ -221,6 +255,15 @@ internal static class Program
             camera.FrameBounds(renderer.Bounds.min, renderer.Bounds.max);
             Console.WriteLine($"  bounds: ({renderer.Bounds.min:F2}) .. ({renderer.Bounds.max:F2})");
             Console.WriteLine($"  camera: pos=({camera.Position:F2}) dist={camera.Distance:F2}");
+
+            if (model.Animations.Count > 0)
+            {
+                pose = new ScenePose(model);
+                var index = Math.Clamp(animIndex, 0, model.Animations.Count - 1);
+                var clip = model.Animations[index];
+                pose.Apply(clip, time);
+                Console.WriteLine($"  pose: animation {index} \"{clip.Name ?? "(unnamed)"}\" at {time:F2}s / {clip.Duration:F2}s");
+            }
         };
 
         window.Render += _ =>
@@ -236,18 +279,24 @@ internal static class Program
                 // close sequence, where the renderer's cull state is live when the
                 // status text draws. Text must still be visible.
                 var aspect = (float)window.Size.X / MathF.Max(window.Size.Y, 1);
-                renderer.Draw(camera, aspect, model.Lights, new Vector3(0.45f, 0.55f, 0.70f), new Vector3(0.22f, 0.20f, 0.18f));
+                renderer.Draw(camera, aspect, model.Lights, new Vector3(0.45f, 0.55f, 0.70f), new Vector3(0.22f, 0.20f, 0.18f), pose);
                 var tw = window.FramebufferSize.X;
                 var th = window.FramebufferSize.Y;
                 using var overlay = new StatusOverlay(gl);
                 overlay.DrawStatus(tw, th, "Closing", "Releasing resources", -1f, 1.25f);
+                if (model.Animations.Count > 0)
+                {
+                    // Same line the interactive viewer shows: proves the selector HUD draws.
+                    overlay.DrawHud(tw, th, $"1/{model.Animations.Count}  \"Take 001\"  0.0s / 1.0s  playing", 17f,
+                        new Vector4(0.80f, 0.85f, 0.93f, 0.92f));
+                }
             }
             else
             {
                 var aspect = (float)window.Size.X / MathF.Max(window.Size.Y, 1);
                 var sky = new Vector3(0.45f, 0.55f, 0.70f);
                 var ground = new Vector3(0.22f, 0.20f, 0.18f);
-                renderer.Draw(camera, aspect, model.Lights, sky, ground);
+                renderer.Draw(camera, aspect, model.Lights, sky, ground, pose);
             }
 
             remaining--;
@@ -324,6 +373,7 @@ internal static class Program
         GL? gl = null;
         Renderer? renderer = null;
         StatusOverlay? overlay = null;
+        AnimationPlayback? playback = null;
         var camera = new OrbitCamera();
 
         // Load pipeline: parse + texture decode run on a background thread; decoded
@@ -394,7 +444,7 @@ internal static class Program
         {
             gl = window.CreateOpenGL();
             overlay = new StatusOverlay(gl);
-            HookInput(window, camera, () => closeRequested = true);
+            HookInput(window, camera, () => closeRequested = true, () => playback);
         };
 
         window.Render += delta =>
@@ -469,6 +519,7 @@ internal static class Program
                 if (renderer is null && loaded is not null)
                 {
                     renderer = new Renderer(gl, loaded);
+                    playback = new AnimationPlayback(loaded);
                     camera.FrameBounds(renderer.Bounds.min, renderer.Bounds.max);
                     window.Title = $"Centre Stage — {Path.GetFileName(path)}";
                 }
@@ -515,7 +566,19 @@ internal static class Program
                 var aspect = (float)width / MathF.Max(height, 1);
                 var sky = new Vector3(0.45f, 0.55f, 0.70f);
                 var ground = new Vector3(0.22f, 0.20f, 0.18f);
-                renderer.Draw(camera, aspect, loaded.Lights, sky, ground);
+
+                if (playback is not null && playback.HasAnimations)
+                {
+                    playback.Advance((float)delta);
+                    playback.Apply();
+                    renderer.Draw(camera, aspect, loaded.Lights, sky, ground, playback.Pose);
+                    overlay.DrawHud(width, height, playback.Describe(), 17f,
+                        new Vector4(0.80f, 0.85f, 0.93f, 0.92f));
+                }
+                else
+                {
+                    renderer.Draw(camera, aspect, loaded.Lights, sky, ground);
+                }
             }
         };
 
@@ -574,9 +637,10 @@ internal static class Program
         return text.Length <= max ? text : text[..(max - 3)] + "...";
     }
 
-    private static void HookInput(IWindow window, OrbitCamera camera, Action requestClose)
+    private static void HookInput(IWindow window, OrbitCamera camera, Action requestClose, Func<AnimationPlayback?>? playback = null)
     {
         var input = window.CreateInput();
+        var getPlayback = playback;
 
         // Last non-fullscreen state, so F11 restores exactly what the user had
         // (maximized included) rather than always dropping to Normal.
@@ -604,6 +668,23 @@ internal static class Program
                     {
                         windowedState = window.WindowState;
                         window.WindowState = WindowState.Fullscreen;
+                    }
+                }
+                else if (getPlayback?.Invoke() is { HasAnimations: true } active)
+                {
+                    switch (key)
+                    {
+                        case Key.Space:
+                            active.Playing = !active.Playing;
+                            break;
+                        case Key.Right:
+                        case Key.Down:
+                            active.Next();
+                            break;
+                        case Key.Left:
+                        case Key.Up:
+                            active.Previous();
+                            break;
                     }
                 }
             };

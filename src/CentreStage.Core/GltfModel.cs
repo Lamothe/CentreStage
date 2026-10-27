@@ -44,6 +44,8 @@ public sealed class GltfModel
     public IReadOnlyList<RuntimeTexture> Textures { get; }
     public IReadOnlyList<RuntimeLight> Lights { get; }
     public IReadOnlyList<RuntimeSkin> Skins { get; }
+    /// <summary>Animation clips carried by the file.</summary>
+    public IReadOnlyList<RuntimeAnimation> Animations { get; }
     /// <summary>Extensions used but not honoured — model loads, some aspects render plainly.</summary>
     public IReadOnlyList<string> IgnoredExtensions { get; }
     public string? Generator { get; }
@@ -62,6 +64,7 @@ public sealed class GltfModel
         IReadOnlyList<RuntimeTexture> textures,
         IReadOnlyList<RuntimeLight> lights,
         IReadOnlyList<RuntimeSkin> skins,
+        IReadOnlyList<RuntimeAnimation> animations,
         IReadOnlyDictionary<int, Matrix4x4> nodeWorlds,
         IReadOnlyList<string> ignoredExtensions)
     {
@@ -73,6 +76,7 @@ public sealed class GltfModel
         Textures = textures;
         Lights = lights;
         Skins = skins;
+        Animations = animations;
         NodeWorlds = nodeWorlds;
         IgnoredExtensions = ignoredExtensions;
         Generator = root.Asset?.Generator;
@@ -111,8 +115,9 @@ public sealed class GltfModel
         var materials = BuildMaterials(root);
         var (meshes, nodes, lights, nodeWorlds) = BuildScene(root, buffers);
         var skins = BuildSkins(root, buffers);
+        var animations = BuildAnimations(root, buffers);
 
-        return new GltfModel(root, buffers, meshes, nodes, materials, textures, lights, skins, nodeWorlds, ignored);
+        return new GltfModel(root, buffers, meshes, nodes, materials, textures, lights, skins, animations, nodeWorlds, ignored);
     }
 
     private static List<RuntimeSkin> BuildSkins(GltfRoot root, BufferData buffers)
@@ -144,6 +149,85 @@ public sealed class GltfModel
                 Name = skin.Name,
                 JointNodes = joints,
                 InverseBindMatrices = matrices,
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Decodes animation clips: keyframe times plus packed sampler outputs. Channels
+    /// targeting morph weights are recorded but not applied (morphs are unsupported);
+    /// samplers they exclusively own are still kept so clip duration stays honest.
+    /// </summary>
+    private static List<RuntimeAnimation> BuildAnimations(GltfRoot root, BufferData buffers)
+    {
+        var result = new List<RuntimeAnimation>();
+        foreach (var anim in root.Animations ?? new List<GltfAnimation>())
+        {
+            var samplers = new List<RuntimeAnimationSampler>();
+            foreach (var s in anim.Samplers ?? new List<GltfAnimationSampler>())
+            {
+                var input = buffers.ReadAccessorFloats(s.Input);
+                var output = buffers.ReadAccessorFloats(s.Output);
+                samplers.Add(new RuntimeAnimationSampler
+                {
+                    Input = input,
+                    Output = output,
+                    Interpolation = s.Interpolation switch
+                    {
+                        "STEP" => AnimationInterpolation.Step,
+                        "CUBICSPLINE" => AnimationInterpolation.CubicSpline,
+                        _ => AnimationInterpolation.Linear,
+                    },
+                });
+            }
+
+            var channels = new List<RuntimeAnimationChannel>();
+            foreach (var c in anim.Channels ?? new List<GltfAnimationChannel>())
+            {
+                // Target-less channels (KHR_animation_pointer) cannot be resolved here.
+                if (c.Target?.Node is not int node || node < 0)
+                {
+                    continue;
+                }
+
+                var path = c.Target.Path switch
+                {
+                    "translation" => AnimationPath.Translation,
+                    "rotation" => AnimationPath.Rotation,
+                    "scale" => AnimationPath.Scale,
+                    "weights" => AnimationPath.Weights,
+                    _ => (AnimationPath?)null,
+                };
+                if (path is null || c.Sampler < 0 || c.Sampler >= samplers.Count)
+                {
+                    continue;
+                }
+
+                channels.Add(new RuntimeAnimationChannel
+                {
+                    NodeIndex = node,
+                    Path = path.Value,
+                    SamplerIndex = c.Sampler,
+                });
+            }
+
+            var duration = 0f;
+            foreach (var s in samplers)
+            {
+                if (s.KeyCount > 0)
+                {
+                    duration = MathF.Max(duration, s.Input[s.KeyCount - 1]);
+                }
+            }
+
+            result.Add(new RuntimeAnimation
+            {
+                Name = anim.Name,
+                Duration = duration,
+                Channels = channels,
+                Samplers = samplers,
             });
         }
 

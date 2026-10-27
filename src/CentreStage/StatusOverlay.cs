@@ -130,6 +130,18 @@ internal sealed class StatusOverlay : IDisposable
     }
 
     /// <summary>
+    /// Draws a small status line (e.g. the animation selector) and flushes immediately.
+    /// </summary>
+    public void DrawHud(int width, int height, string text, float size, Vector4 color)
+    {
+        _width = width;
+        _height = height;
+        _vertsUsed = 0;
+        DrawText(text, 16f, height - size - 16f, size, color);
+        Flush();
+    }
+
+    /// <summary>
     /// Draws one line of text at pixel coordinates: x is the left edge, y the top
     /// of the line, size the em height in pixels.
     /// </summary>

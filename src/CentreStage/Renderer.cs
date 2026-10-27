@@ -14,6 +14,9 @@ internal sealed unsafe class Renderer : IDisposable
 {
     private const int MaxLights = 4;
 
+    /// <summary>Joint palette capacity in the uniform block (16 KB: the guaranteed minimum).</summary>
+    private const int MaxJoints = 256;
+
     private readonly GL _gl;
     private readonly GltfModel _model;
     private readonly uint _program;
@@ -24,6 +27,14 @@ internal sealed unsafe class Renderer : IDisposable
     private readonly List<GlPrimitive> _ordered = new();
     private bool _disposed;
     private readonly Dictionary<string, int> _materialUniformCache = new();
+
+    /// <summary>
+    /// Animated models skin on the GPU (per-frame joint palettes); everything else keeps
+    /// the CPU-baked static pose. One path or the other per model, never both.
+    /// </summary>
+    private readonly bool _gpuSkinning;
+    private readonly uint _jointUbo;
+    private readonly Matrix4x4[] _jointScratch = new Matrix4x4[MaxJoints];
 
     private static readonly int[] SamplerWraps = { 10497, 33071, 33648 }; // repeat, clamp, mirrored
 
@@ -39,6 +50,10 @@ internal sealed unsafe class Renderer : IDisposable
         public int Seq;
         public bool DoubleSided;
         public AlphaMode AlphaMode;
+        public int NodeIndex;
+        public int SkinIndex = -1;
+        /// <summary>True when this primitive is skinned by the GPU palette (animated models).</summary>
+        public bool GpuSkinned;
     }
 
     public Renderer(GL gl, GltfModel model, ImageResult?[]? decodedTextures = null)
@@ -49,6 +64,20 @@ internal sealed unsafe class Renderer : IDisposable
         _textureIds = new int[model.Textures.Count];
         Array.Fill(_textureIds, -1);
         _srgbTextures = TextureColorSpace.SrgbTextureIndices(model.Materials);
+        _gpuSkinning = model.Animations.Count > 0;
+        if (_gpuSkinning)
+        {
+            _jointUbo = _gl.GenBuffer();
+            _gl.BindBuffer(BufferTargetARB.UniformBuffer, _jointUbo);
+            _gl.BufferData(BufferTargetARB.UniformBuffer, (nuint)(MaxJoints * 16 * sizeof(float)), null, BufferUsageARB.DynamicDraw);
+            var blockIndex = _gl.GetUniformBlockIndex(_program, "JointBlock");
+            if (blockIndex != 0xFFFFFFFF) // GL_INVALID_INDEX: block not present (e.g. solid diagnostic shader)
+            {
+                _gl.UniformBlockBinding(_program, blockIndex, 0);
+            }
+
+            _gl.BindBufferBase(BufferTargetARB.UniformBuffer, 0, _jointUbo);
+        }
         foreach (var shared in TextureColorSpace.SharedUsage(model.Materials))
         {
             Console.Error.WriteLine(
@@ -260,8 +289,9 @@ internal sealed unsafe class Renderer : IDisposable
             var mesh = _model.Meshes[node.MeshIndex];
 
             // glTF spec: a skinned mesh ignores its node's transform; its pose comes from the
-            // joint matrices. We skin on the CPU at upload (static pose), which is exactly what
-            // the file's rest pose gives us.
+            // joint matrices. Two paths: animated models carry joints/weights to the GPU and
+            // skin per frame from the posed palette; everything else bakes the rest pose on
+            // the CPU at upload — exactly what the file's rest pose gives us.
             Matrix4x4[]? jointMatrices = null;
             var world = Matrix4x4.Identity;
             if (node.SkinIndex >= 0)
@@ -290,10 +320,14 @@ internal sealed unsafe class Renderer : IDisposable
                 _gl.BindVertexArray(vao);
 
                 // Interleave position/normal/tangent/uv0/uv1/colour into one stream:
-                // pos(3) nrm(3) tan(4) uv0(2) uv1(2) colour(4) = 18 floats.
+                // pos(3) nrm(3) tan(4) uv0(2) uv1(2) colour(4) = 18 floats. GPU-skinned
+                // primitives append joints(4) weights(4) = 26 floats.
+                var gpuSkinned = _gpuSkinning && jointMatrices is not null
+                    && prim.Weights is not null && prim.Joints is not null;
+                var floatsPerVertex = gpuSkinned ? 26 : 18;
                 var vertexCount = prim.Positions.Length;
-                var stride = 18 * sizeof(float);
-                var data = new float[vertexCount * 18];
+                var stride = floatsPerVertex * sizeof(float);
+                var data = new float[vertexCount * floatsPerVertex];
                 var primMin = new Vector3(float.MaxValue);
                 var primMax = new Vector3(float.MinValue);
                 for (var i = 0; i < vertexCount; i++)
@@ -302,15 +336,24 @@ internal sealed unsafe class Renderer : IDisposable
                     var rawNormal = prim.Normals is { } normals ? normals[i] : Vector3.UnitY;
                     var rawTangent = prim.Tangents is { } tangents ? tangents[i] : new Vector4(1, 0, 0, 1);
 
-                    // Skinned vertices are baked to world space at upload (static pose) and
-                    // drawn at identity; unskinned vertices stay raw and uModel carries the
-                    // node's world at draw time. Never both — that transforms twice.
+                    // CPU-baked skinning stores world-space vertices and draws at identity;
+                    // unskinned and GPU-skinned vertices stay raw and the transform happens
+                    // at draw time. Never both — that transforms twice.
                     Vector3 storedPosition;
                     Vector3 storedNormal;
                     Vector4 storedTangent;
                     Vector3 worldPosition;
 
-                    if (jointMatrices is not null && prim.Weights is { } weights && prim.Joints is { } joints)
+                    if (gpuSkinned)
+                    {
+                        storedPosition = rawPosition;
+                        storedNormal = rawNormal;
+                        storedTangent = rawTangent;
+                        // Bounds still need the rest-pose world extent.
+                        var restMatrix = SkinMatrix(jointMatrices!, prim.Joints![i], prim.Weights![i]);
+                        worldPosition = Vector3.Transform(rawPosition, restMatrix);
+                    }
+                    else if (jointMatrices is not null && prim.Weights is { } weights && prim.Joints is { } joints)
                     {
                         var skinMatrix = SkinMatrix(jointMatrices, joints[i], weights[i]);
                         storedPosition = Vector3.Transform(rawPosition, skinMatrix);
@@ -329,7 +372,7 @@ internal sealed unsafe class Renderer : IDisposable
                         worldPosition = Vector3.Transform(rawPosition, world);
                     }
 
-                    var o = i * 18;
+                    var o = i * floatsPerVertex;
                     data[o + 0] = storedPosition.X;
                     data[o + 1] = storedPosition.Y;
                     data[o + 2] = storedPosition.Z;
@@ -368,6 +411,43 @@ internal sealed unsafe class Renderer : IDisposable
                         data[o + 17] = 1f;
                     }
 
+                    if (gpuSkinned)
+                    {
+                        // Joints are indices into the skin's palette; slots pointing outside
+                        // what the palette can address (invalid or beyond MaxJoints) drop out
+                        // here exactly as SkinMatrix does on the CPU — and the index is
+                        // sanitised to 0 too, because GLSL reads all four slots regardless
+                        // of weight and an out-of-range uJoints[] read is undefined.
+                        var joints = prim.Joints![i];
+                        var weights = prim.Weights![i];
+                        var jointCount = Math.Min(jointMatrices!.Length, MaxJoints);
+                        Span<float> jx = stackalloc float[4] { joints.X, joints.Y, joints.Z, joints.W };
+                        Span<float> wx = stackalloc float[4]
+                        {
+                            MathF.Max(weights.X, 0f),
+                            MathF.Max(weights.Y, 0f),
+                            MathF.Max(weights.Z, 0f),
+                            MathF.Max(weights.W, 0f),
+                        };
+                        for (var s = 0; s < 4; s++)
+                        {
+                            if (jx[s] < 0f || jx[s] >= jointCount)
+                            {
+                                wx[s] = 0f;
+                                jx[s] = 0f;
+                            }
+                        }
+
+                        data[o + 18] = jx[0];
+                        data[o + 19] = jx[1];
+                        data[o + 20] = jx[2];
+                        data[o + 21] = jx[3];
+                        data[o + 22] = wx[0];
+                        data[o + 23] = wx[1];
+                        data[o + 24] = wx[2];
+                        data[o + 25] = wx[3];
+                    }
+
                     min = Vector3.Min(min, worldPosition);
                     max = Vector3.Max(max, worldPosition);
                     primMin = Vector3.Min(primMin, worldPosition);
@@ -394,6 +474,11 @@ internal sealed unsafe class Renderer : IDisposable
                 Attrib(3, 2, 10); // uv0
                 Attrib(4, 2, 12); // uv1
                 Attrib(5, 4, 14); // colour
+                if (gpuSkinned)
+                {
+                    Attrib(6, 4, 18); // joints
+                    Attrib(7, 4, 22); // weights
+                }
 
                 var ibo = _gl.GenBuffer();
                 _gl.BindBuffer(BufferTargetARB.ElementArrayBuffer, ibo);
@@ -424,6 +509,9 @@ internal sealed unsafe class Renderer : IDisposable
                     AlphaMode = matIndex >= 0 && _model.Materials[matIndex].AlphaMode == AlphaMode.Blend
                         ? AlphaMode.Blend
                         : AlphaMode.Opaque,
+                    NodeIndex = node.NodeIndex,
+                    SkinIndex = node.SkinIndex,
+                    GpuSkinned = gpuSkinned,
                 });
             }
         }
@@ -441,6 +529,30 @@ internal sealed unsafe class Renderer : IDisposable
 
         throw new InvalidDataException(
             $"Skin joint references node #{nodeIndex}, which does not exist in the file.");
+    }
+
+    /// <summary>
+    /// Computes and uploads a skin's joint palette (inverseBind x jointWorld) for the
+    /// current pose. Clamped to <see cref="MaxJoints"/>: oversized rigs fall back to
+    /// lower joints rather than overflowing the uniform block.
+    /// </summary>
+    private void UploadJointPalette(ScenePose pose, int skinIndex)
+    {
+        var skin = _model.Skins[skinIndex];
+        var count = Math.Min(skin.JointNodes.Count, MaxJoints);
+        if (skin.JointNodes.Count > MaxJoints)
+        {
+            Console.Error.WriteLine(
+                $"warning: skin '{skin.Name ?? skinIndex.ToString()}' has {skin.JointNodes.Count} joints; "
+                + $"only the first {MaxJoints} animate.");
+        }
+
+        pose.JointMatrices(skin, _jointScratch.AsSpan(0, count));
+        _gl.BindBuffer(BufferTargetARB.UniformBuffer, _jointUbo);
+        fixed (Matrix4x4* p = _jointScratch)
+        {
+            _gl.BufferSubData(BufferTargetARB.UniformBuffer, 0, (nuint)(count * 16 * sizeof(float)), p);
+        }
     }
 
     /// <summary>Weighted skin matrix for one vertex: sum of w * (inverseBind * jointWorld) over 4 joints.</summary>
@@ -475,7 +587,13 @@ internal sealed unsafe class Renderer : IDisposable
         return total < 0.999f || total > 1.001f ? sum * (1f / total) : sum;
     }
 
-    public void Draw(OrbitCamera camera, float aspect, IReadOnlyList<RuntimeLight> lights, Vector3 sky, Vector3 ground)
+    /// <summary>
+    /// Draws the frame. <paramref name="pose"/> is null for static models (drawn exactly
+    /// as uploaded) or a posed scene for animated models: unskinned primitives pick up
+    /// their node's posed world matrix, GPU-skinned ones get the skin's joint palette
+    /// uploaded before their draw call.
+    /// </summary>
+    public void Draw(OrbitCamera camera, float aspect, IReadOnlyList<RuntimeLight> lights, Vector3 sky, Vector3 ground, ScenePose? pose = null)
     {
         _gl.ClearColor(sky.X * 0.25f, sky.Y * 0.25f, sky.Z * 0.25f, 1f);
         _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
@@ -542,7 +660,25 @@ internal sealed unsafe class Renderer : IDisposable
                 }
 
                 ApplyMaterial(prim.MaterialIndex);
-                SetMat4("uModel", prim.World);
+
+                var model = prim.World;
+                var skinned = false;
+                if (pose is not null)
+                {
+                    if (prim.GpuSkinned && prim.SkinIndex >= 0)
+                    {
+                        UploadJointPalette(pose, prim.SkinIndex);
+                        skinned = true;
+                        model = Matrix4x4.Identity; // pose lives in the palette
+                    }
+                    else
+                    {
+                        model = pose.World(prim.NodeIndex);
+                    }
+                }
+
+                SetMat4("uModel", model);
+                SetInt("uSkinned", skinned ? 1 : 0);
 
                 if (prim.DoubleSided)
                 {

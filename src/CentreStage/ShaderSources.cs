@@ -24,10 +24,17 @@ internal static class ShaderSources
         layout (location = 3) in vec2 aTexCoord0;
         layout (location = 4) in vec2 aTexCoord1;
         layout (location = 5) in vec4 aColor;
+        layout (location = 6) in vec4 aJoints;
+        layout (location = 7) in vec4 aWeights;
+
+        // Skinning palette: inverseBind x jointWorld per joint, uploaded per frame.
+        const int MAX_JOINTS = 256;
+        layout (std140) uniform JointBlock { mat4 uJoints[MAX_JOINTS]; };
 
         uniform mat4 uModel;
         uniform mat4 uView;
         uniform mat4 uProjection;
+        uniform bool uSkinned;
 
         out vec3 vWorldPos;
         out vec3 vNormal;
@@ -39,11 +46,32 @@ internal static class ShaderSources
 
         void main()
         {
-            vec4 world = uModel * vec4(aPosition, 1.0);
+            vec3 localPosition = aPosition;
+            vec3 localNormal = aNormal;
+            vec3 localTangent = aTangent.xyz;
+            if (uSkinned)
+            {
+                // Weights are pre-normalised on upload; dividing by their sum covers
+                // the all-zero fallback (identity) without another branch.
+                vec4 w = aWeights;
+                float wsum = w.x + w.y + w.z + w.w;
+                if (wsum > 0.0)
+                {
+                    mat4 skin = (w.x * uJoints[int(aJoints.x)]
+                        + w.y * uJoints[int(aJoints.y)]
+                        + w.z * uJoints[int(aJoints.z)]
+                        + w.w * uJoints[int(aJoints.w)]) / wsum;
+                    localPosition = (skin * vec4(aPosition, 1.0)).xyz;
+                    localNormal = mat3(skin) * aNormal;
+                    localTangent = mat3(skin) * aTangent.xyz;
+                }
+            }
+
+            vec4 world = uModel * vec4(localPosition, 1.0);
             vWorldPos = world.xyz;
             mat3 normalMat = mat3(uModel);
-            vNormal = normalize(normalMat * aNormal);
-            vTangent = normalize(normalMat * aTangent.xyz);
+            vNormal = normalize(normalMat * localNormal);
+            vTangent = normalize(normalMat * localTangent);
             vBitangent = cross(vNormal, vTangent) * aTangent.w;
             vTexCoord0 = aTexCoord0;
             vTexCoord1 = aTexCoord1;

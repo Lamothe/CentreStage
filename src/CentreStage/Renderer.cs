@@ -279,6 +279,11 @@ internal sealed unsafe class Renderer : IDisposable
         var max = new Vector3(float.MinValue);
         var any = false;
 
+        // Per-vertex scratch for joint sanitisation, allocated once here (CA2014:
+        // stackalloc inside the loops would grow the stack per primitive/vertex).
+        Span<float> jx = stackalloc float[4];
+        Span<float> wx = stackalloc float[4];
+
         foreach (var node in _model.Nodes)
         {
             if (node.MeshIndex < 0)
@@ -421,14 +426,14 @@ internal sealed unsafe class Renderer : IDisposable
                         var joints = prim.Joints![i];
                         var weights = prim.Weights![i];
                         var jointCount = Math.Min(jointMatrices!.Length, MaxJoints);
-                        Span<float> jx = stackalloc float[4] { joints.X, joints.Y, joints.Z, joints.W };
-                        Span<float> wx = stackalloc float[4]
-                        {
-                            MathF.Max(weights.X, 0f),
-                            MathF.Max(weights.Y, 0f),
-                            MathF.Max(weights.Z, 0f),
-                            MathF.Max(weights.W, 0f),
-                        };
+                        jx[0] = joints.X;
+                        jx[1] = joints.Y;
+                        jx[2] = joints.Z;
+                        jx[3] = joints.W;
+                        wx[0] = MathF.Max(weights.X, 0f);
+                        wx[1] = MathF.Max(weights.Y, 0f);
+                        wx[2] = MathF.Max(weights.Z, 0f);
+                        wx[3] = MathF.Max(weights.W, 0f);
                         for (var s = 0; s < 4; s++)
                         {
                             if (jx[s] < 0f || jx[s] >= jointCount)

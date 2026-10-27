@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Centre Stage
+Comment=View glTF and GLB 3D models
+Exec="@BINDIR@/CentreStage" %f
+Icon=centrestage
+Terminal=false
+Type=Application
+Categories=Graphics;3DGraphics;Viewer;
+MimeType=model/gltf-binary;model/gltf+json;
+StartupNotify=true

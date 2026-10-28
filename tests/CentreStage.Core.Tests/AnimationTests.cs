@@ -401,6 +401,74 @@ public class AnimationTests
     }
 
     [Fact]
+    public void Pose_VersionTracksRealChangesOnly()
+    {
+        // The renderer keys per-frame re-sorting on Version: re-applying the same
+        // (clip, time) every frame (paused playback) must not bump it, while any
+        // real change must. Reset then re-apply must recompute (same clip/time is
+        // only a no-op when that pose is already in effect).
+        var ibm = new float[16];
+        ibm[0] = 1f;
+        ibm[5] = 1f;
+        ibm[10] = 1f;
+        ibm[15] = 1f;
+        ibm[12] = -2f;
+
+        var times = new[] { 0f, 1f };
+        var values = new[] { 0f, 0f, 0f, 4f, 0f, 0f };
+        var bin = Floats(times, values, ibm);
+
+        var nodes = new object[]
+        {
+            new { children = new[] { 1, 2 } },
+            new { translation = new[] { 2f, 0f, 0f } },
+            new { },
+        };
+        var skins = new[] { new { joints = new[] { 1 }, inverseBindMatrices = 2 } };
+        var animations = new[]
+        {
+            new
+            {
+                channels = new[] { new { sampler = 0, target = new { node = 1, path = "translation" } } },
+                samplers = new[] { new { input = 0, output = 1 } },
+            },
+        };
+
+        var model = ModelWithNodesAndClip(
+            nodes, animations, skins, bin,
+            accessors: new[]
+            {
+                new { bufferView = 0, componentType = 5126, count = 2, type = "SCALAR" },
+                new { bufferView = 1, componentType = 5126, count = 2, type = "VEC3" },
+                new { bufferView = 2, componentType = 5126, count = 1, type = "MAT4" },
+            },
+            bufferViews: new[]
+            {
+                new { buffer = 0, byteOffset = 0, byteLength = 8 },
+                new { buffer = 0, byteOffset = 8, byteLength = 24 },
+                new { buffer = 0, byteOffset = 32, byteLength = 64 },
+            });
+
+        var pose = new ScenePose(model);
+        pose.Apply(model.Animations[0], 1f);
+        var first = pose.Version;
+
+        pose.Apply(model.Animations[0], 1f); // same clip and time: no-op
+        Assert.Equal(first, pose.Version);
+
+        pose.Apply(model.Animations[0], 0.5f); // different time: recompute
+        Assert.True(pose.Version > first);
+
+        pose.Reset();
+        var afterReset = pose.Version;
+        pose.Reset(); // already at rest: no-op
+        Assert.Equal(afterReset, pose.Version);
+
+        pose.Apply(model.Animations[0], 1f); // re-apply after Reset must recompute
+        Assert.True(pose.Version > afterReset);
+    }
+
+    [Fact]
     public void Pose_MatrixNodeWithShearFallsBackSafely()
     {
         // A matrix with a shear cannot decompose: pose must not throw or NaN.

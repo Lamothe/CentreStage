@@ -31,8 +31,8 @@ dotnet run --project src/CentreStage -- --inspect <model.glb>    # dump structur
 dotnet run --project src/CentreStage -- <model.glb> --capture out.png   # offscreen render
 ```
 
-Mouse: left-drag orbit, right/middle-drag pan, scroll zoom, F11 toggles fullscreen,
-Esc quits. The interactive viewer opens immediately and shows progress ("Parsing",
+Mouse: left-drag orbit, right/middle-drag pan, scroll zoom, double-click or F11 toggles
+fullscreen, Esc quits. The interactive viewer opens immediately and shows progress ("Parsing",
 "Uploading textures n/N", "Closing") via an antialiased TrueType status overlay
 (rasterised from a system sans face; a small bitmap font is the last-resort fallback):
 parsing and texture decoding run on a background thread, and textures upload

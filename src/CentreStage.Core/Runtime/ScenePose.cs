@@ -27,6 +27,11 @@ public sealed class ScenePose
     private readonly Vector3[] _curS;
     private readonly bool[] _computed;
 
+    // Last applied (clip, time), so a per-frame re-apply of an unchanged pose is a no-op.
+    private RuntimeAnimation? _appliedClip;
+    private float _appliedTime;
+    private bool _poseSet;
+
     public ScenePose(GltfModel model)
     {
         var nodes = model.Root.Nodes ?? new List<Schema.GltfNode>();
@@ -100,14 +105,27 @@ public sealed class ScenePose
     public Matrix4x4 World(int nodeIndex) => _worlds[nodeIndex];
 
     /// <summary>
+    /// Increments whenever the pose actually changes. Renderers key per-frame work
+    /// (translucent re-sorting) on this instead of redoing it every frame: a paused
+    /// playback re-applies the same (clip, time) each frame and must not invalidate.
+    /// </summary>
+    public int Version { get; private set; }
+
+    /// <summary>
     /// Applies one clip at <paramref name="time"/> (seconds, already wrapped by the
-    /// caller) and recomputes worlds. Null restores the rest pose.
+    /// caller) and recomputes worlds. Null restores the rest pose. Re-applying the
+    /// same clip at the same time is a no-op.
     /// </summary>
     public void Apply(RuntimeAnimation? clip, float time)
     {
         if (clip is null)
         {
             Reset();
+            return;
+        }
+
+        if (_poseSet && ReferenceEquals(clip, _appliedClip) && time == _appliedTime)
+        {
             return;
         }
 
@@ -163,11 +181,20 @@ public sealed class ScenePose
         }
 
         RecomputeWorlds();
+
+        _appliedClip = clip;
+        _appliedTime = time;
+        _poseSet = true;
+        Version++;
     }
 
     /// <summary>Restores the bind/rest pose.</summary>
     public void Reset()
     {
+        if (_poseSet && _appliedClip is null)
+        {
+            return;
+        }
         for (var i = 0; i < _nodeCount; i++)
         {
             if (_animated[i])
@@ -179,6 +206,11 @@ public sealed class ScenePose
         }
 
         RecomputeWorlds();
+
+        _appliedClip = null;
+        _appliedTime = 0f;
+        _poseSet = true;
+        Version++;
     }
 
     /// <summary>

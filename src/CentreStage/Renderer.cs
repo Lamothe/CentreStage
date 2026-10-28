@@ -38,6 +38,13 @@ internal sealed unsafe class Renderer : IDisposable
     private readonly uint _jointPaletteTex;
     private readonly Matrix4x4[] _jointScratch;
 
+    // Blend-sort state: triangle order is recomputed only when the view or pose moved.
+    private Matrix4x4 _sortedView;
+    private int _sortedPoseVersion = -1;
+    private bool _sortedOnce;
+    private float[] _depthScratch = Array.Empty<float>();
+    private ulong[] _sortKeys = Array.Empty<ulong>();
+
     private static readonly int[] SamplerWraps = { 10497, 33071, 33648 }; // repeat, clamp, mirrored
 
     private sealed class GlPrimitive
@@ -56,6 +63,13 @@ internal sealed unsafe class Renderer : IDisposable
         public int SkinIndex = -1;
         /// <summary>True when this primitive is skinned by the GPU palette (animated models).</summary>
         public bool GpuSkinned;
+
+        /// <summary>CPU-side source data for per-frame blend sorting. Owned by the model.</summary>
+        public RuntimePrimitive? Source;
+        /// <summary>Rest-pose joint palette (CPU-baked skins), for sort depth. Null when unskinned.</summary>
+        public Matrix4x4[]? RestPalette;
+        /// <summary>Scratch for the per-frame back-to-front triangle order (blend primitives only).</summary>
+        public uint[]? SortedIndices;
     }
 
     public Renderer(GL gl, GltfModel model, ImageResult?[]? decodedTextures = null, bool animate = true)
@@ -546,6 +560,11 @@ internal sealed unsafe class Renderer : IDisposable
                     NodeIndex = node.NodeIndex,
                     SkinIndex = node.SkinIndex,
                     GpuSkinned = gpuSkinned,
+                    // CPU-side data for the per-triangle blend sort: the raw primitive
+                    // and the rest palette that produced baked world-space vertices.
+                    Source = prim,
+                    RestPalette = jointMatrices,
+                    SortedIndices = new uint[indices.Length],
                 });
             }
         }
@@ -587,7 +606,14 @@ internal sealed unsafe class Renderer : IDisposable
     }
 
     /// <summary>Weighted skin matrix for one vertex: sum of w * (inverseBind * jointWorld) over 4 joints.</summary>
-    private static Matrix4x4 SkinMatrix(Matrix4x4[] jointMatrices, Vector4 joints, Vector4 weights)
+    /// <summary>NaN joint indices map to 0 (their weight is zeroed by SanitiseWeight), matching the upload path.</summary>
+    private static float SanitiseJoint(float joint) => float.IsNaN(joint) ? 0f : joint;
+
+    /// <summary>Slots whose joint is invalid/NaN or whose weight is non-positive drop out.</summary>
+    private static float SanitiseWeight(float weight, float joint) =>
+        float.IsNaN(joint) || float.IsNaN(weight) ? 0f : MathF.Max(weight, 0f);
+
+    private static Matrix4x4 SkinMatrix(ReadOnlySpan<Matrix4x4> jointMatrices, Vector4 joints, Vector4 weights)
     {
         var sum = default(Matrix4x4);
         var total = 0f;
@@ -619,6 +645,112 @@ internal sealed unsafe class Renderer : IDisposable
     }
 
     /// <summary>
+    /// Rewrites a blend primitive's index buffer into back-to-front triangle order for
+    /// the current view and pose (painter's algorithm — straight-alpha compositing is
+    /// order-dependent). Depth is per-vertex view-space Z computed through exactly the
+    /// transform chain the draw call uses, so the order matches what rasterises.
+    /// </summary>
+    private void UpdateBlendSort(GlPrimitive prim, Matrix4x4 view, ScenePose? pose)
+    {
+        if (prim.Source is not { } src || prim.SortedIndices is null)
+        {
+            return;
+        }
+
+        var triCount = prim.IndexCount / 3;
+        if (triCount < 2)
+        {
+            return;
+        }
+
+        var positions = src.Positions;
+        var vertexCount = positions.Length;
+        if (_depthScratch.Length < vertexCount)
+        {
+            _depthScratch = new float[vertexCount];
+        }
+
+        if (_sortKeys.Length < triCount)
+        {
+            _sortKeys = new ulong[triCount];
+        }
+
+        // Mirror the draw path exactly: GPU-skinned primitives transform through the
+        // posed palette at identity; CPU-baked skinned ones were uploaded world-space
+        // through the rest palette; everything else takes its node's world matrix.
+        // A GPU-skinned primitive drawn without a pose is NOT skinned at all (the
+        // shader gets uSkinned=0 and raw vertices), so it must not be skinned here.
+        var skinned = pose is not null && prim.GpuSkinned && prim.SkinIndex >= 0;
+        Matrix4x4 model;
+        ReadOnlySpan<Matrix4x4> posed = default;
+        if (skinned)
+        {
+            var skin = _model.Skins[prim.SkinIndex];
+            var count = Math.Min(skin.JointNodes.Count, _jointCapacity);
+            pose!.JointMatrices(skin, _jointScratch.AsSpan(0, count));
+            posed = _jointScratch.AsSpan(0, count);
+            model = Matrix4x4.Identity;
+        }
+        else if (prim.GpuSkinned)
+        {
+            model = prim.World;
+        }
+        else
+        {
+            model = pose is not null ? pose.World(prim.NodeIndex) : prim.World;
+        }
+
+        var joints = src.Joints;
+        var weights = src.Weights;
+        var baked = prim.GpuSkinned ? null : prim.RestPalette;
+        for (var i = 0; i < vertexCount; i++)
+        {
+            var pos = positions[i];
+            if (joints is not null && weights is not null)
+            {
+                var j = joints[i];
+                var w = weights[i];
+
+                // Mirror the upload sanitisation exactly (NaN joints drop out with
+                // their weight so the palette lookup is always defined) and the
+                // shader's NaN fallback: a NaN weight sum makes the whole vertex
+                // rasterise raw, so it must sort raw too. Without this the sort can
+                // disagree with what actually draws on corrupt attributes.
+                if (!float.IsNaN(w.X + w.Y + w.Z + w.W))
+                {
+                    var jx = new Vector4(SanitiseJoint(j.X), SanitiseJoint(j.Y), SanitiseJoint(j.Z), SanitiseJoint(j.W));
+                    var wx = new Vector4(
+                        SanitiseWeight(w.X, j.X), SanitiseWeight(w.Y, j.Y),
+                        SanitiseWeight(w.Z, j.Z), SanitiseWeight(w.W, j.W));
+                    if (!posed.IsEmpty)
+                    {
+                        pos = Vector3.Transform(pos, SkinMatrix(posed, jx, wx));
+                    }
+                    else if (baked is not null)
+                    {
+                        pos = Vector3.Transform(pos, SkinMatrix(baked, jx, wx));
+                    }
+                }
+            }
+
+            _depthScratch[i] = Vector3.Transform(Vector3.Transform(pos, model), view).Z;
+        }
+
+        TriangleSort.SortBackToFront(
+            _depthScratch.AsSpan(0, vertexCount),
+            src.Indices.AsSpan(0, prim.IndexCount),
+            prim.SortedIndices.AsSpan(0, prim.IndexCount),
+            _sortKeys.AsSpan(0, triCount));
+
+        _gl.BindVertexArray(prim.Vao);
+        _gl.BindBuffer(BufferTargetARB.ElementArrayBuffer, prim.IndexBuffer);
+        fixed (uint* p = prim.SortedIndices)
+        {
+            _gl.BufferSubData(BufferTargetARB.ElementArrayBuffer, 0, (nuint)(prim.IndexCount * sizeof(uint)), p);
+        }
+    }
+
+    /// <summary>
     /// Draws the frame. <paramref name="pose"/> is null for static models (drawn exactly
     /// as uploaded) or a posed scene for animated models: unskinned primitives pick up
     /// their node's posed world matrix, GPU-skinned ones get the skin's joint palette
@@ -630,7 +762,8 @@ internal sealed unsafe class Renderer : IDisposable
         _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
         _gl.UseProgram(_program);
-        SetMat4("uView", camera.View);
+        var view = camera.View;
+        SetMat4("uView", view);
         SetMat4("uProjection", camera.Projection(aspect));
         SetVec3("uCameraPos", camera.Position);
         SetVec3("uSkyColor", sky);
@@ -656,12 +789,19 @@ internal sealed unsafe class Renderer : IDisposable
         _gl.DepthMask(true);
         _gl.Disable(EnableCap.Blend);
 
-        // Opaque + masked first (depth writes on). Blended primitives then draw
-        // farthest-centre-first — straight-alpha compositing is order-dependent, and
-        // an unsorted pass lets near shells (hair caps) paint over far wisps. This is
-        // a per-primitive approximation: triangles within one draw call stay in index
-        // order, and a large shell can still overtake small cards near its centre.
-        // Exact ordering needs per-triangle sorting or order-independent translucency.
+        // Opaque + masked first (depth writes on). Blended primitives then draw in
+        // per-triangle back-to-front order (the painter's algorithm): straight-alpha
+        // compositing is order-dependent, and index-order drawing lets near cards paint
+        // over far ones that should show through. Triangle order is only recomputed when
+        // the view or pose changed — a still frame costs nothing.
+        var poseVersion = pose?.Version ?? -1;
+        var sortDirty = !_sortedOnce || poseVersion != _sortedPoseVersion || view != _sortedView;
+        if (sortDirty)
+        {
+            _sortedView = view;
+            _sortedPoseVersion = poseVersion;
+            _sortedOnce = true;
+        }
         if (_ordered.Count != _primitives.Count)
         {
             _ordered.Clear();
@@ -710,6 +850,11 @@ internal sealed unsafe class Renderer : IDisposable
 
                 SetMat4("uModel", model);
                 SetInt("uSkinned", skinned ? 1 : 0);
+
+                if (pass == AlphaMode.Blend && sortDirty)
+                {
+                    UpdateBlendSort(prim, view, pose);
+                }
 
                 if (prim.DoubleSided)
                 {

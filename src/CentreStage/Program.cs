@@ -136,7 +136,8 @@ internal static class Program
                     var jmax = prim.Joints is { } jn
                         ? jn.Max(j => MathF.Max(MathF.Max(j.X, j.Y), MathF.Max(j.Z, j.W)))
                         : -1f;
-                    Console.WriteLine($"  mesh[{mi}] prim[{pi}] verts={prim.Positions.Length} idx={prim.Indices.Length} mode={prim.Mode} idxMax={idxMax} jmax={jmax} first=[{idxFirst}] raw bounds ({min:F3}) .. ({max:F3})");
+                    var mat = prim.MaterialIndex >= 0 ? model.Materials[prim.MaterialIndex] : null;
+                    Console.WriteLine($"  mesh[{mi}] prim[{pi}] verts={prim.Positions.Length} idx={prim.Indices.Length} mode={prim.Mode} alpha={mat?.AlphaMode ?? AlphaMode.Opaque} jmax={jmax} idxMax={idxMax} first=[{idxFirst}] raw bounds ({min:F3}) .. ({max:F3})");
                 }
             }
         }
@@ -650,6 +651,19 @@ internal static class Program
         // (maximized included) rather than always dropping to Normal.
         var windowedState = window.WindowState;
 
+        void ToggleFullscreen()
+        {
+            if (window.WindowState == WindowState.Fullscreen)
+            {
+                window.WindowState = windowedState;
+            }
+            else
+            {
+                windowedState = window.WindowState;
+                window.WindowState = WindowState.Fullscreen;
+            }
+        }
+
         // Keyboard first and unconditionally: Esc is the only close path that works
         // without a pointer device, so it must not be behind the mouse guard.
         foreach (var keyboard in input.Keyboards)
@@ -664,15 +678,7 @@ internal static class Program
                 }
                 else if (key == Key.F11)
                 {
-                    if (window.WindowState == WindowState.Fullscreen)
-                    {
-                        window.WindowState = windowedState;
-                    }
-                    else
-                    {
-                        windowedState = window.WindowState;
-                        window.WindowState = WindowState.Fullscreen;
-                    }
+                    ToggleFullscreen();
                 }
                 else if (getPlayback?.Invoke() is { HasAnimations: true } active)
                 {
@@ -703,11 +709,31 @@ internal static class Program
         var dragging = false;
         var panning = false;
         var lastPosition = new Vector2(float.NaN, float.NaN);
+        var lastClickTicks = 0L;
+        var lastClickPos = new Vector2(float.NaN, float.NaN);
 
-        primary.MouseDown += (_, button) =>
+        primary.MouseDown += (mouse, button) =>
         {
             dragging = button == MouseButton.Left;
             panning = button == MouseButton.Right || button == MouseButton.Middle;
+            if (button == MouseButton.Left)
+            {
+                // Double-click toggles fullscreen, like F11. A third rapid click
+                // starts a fresh pair rather than toggling straight back.
+                var now = Environment.TickCount64;
+                var pos = new Vector2(mouse.Position.X, mouse.Position.Y);
+                if (now - lastClickTicks < 500 && Vector2.Distance(pos, lastClickPos) < 6f)
+                {
+                    lastClickTicks = 0;
+                    ToggleFullscreen();
+                }
+                else
+                {
+                    lastClickTicks = now;
+                    lastClickPos = pos;
+                }
+            }
+
             lastPosition = new Vector2(float.NaN, float.NaN); // reset so the first move doesn't jump
         };
         primary.MouseUp += (_, button) =>

@@ -14,8 +14,8 @@ internal sealed unsafe class Renderer : IDisposable
 {
     private const int MaxLights = 4;
 
-    /// <summary>Joint palette capacity in the uniform block (16 KB: the guaranteed minimum).</summary>
-    private const int MaxJoints = 256;
+    /// <summary>Texture unit for the joint palette buffer texture; material slots use 0..11.</summary>
+    private const int JointPaletteUnit = 15;
 
     private readonly GL _gl;
     private readonly GltfModel _model;
@@ -33,8 +33,10 @@ internal sealed unsafe class Renderer : IDisposable
     /// the CPU-baked static pose. One path or the other per model, never both.
     /// </summary>
     private readonly bool _gpuSkinning;
-    private readonly uint _jointUbo;
-    private readonly Matrix4x4[] _jointScratch = new Matrix4x4[MaxJoints];
+    private readonly int _jointCapacity;
+    private readonly uint _jointTbo;
+    private readonly uint _jointPaletteTex;
+    private readonly Matrix4x4[] _jointScratch;
 
     private static readonly int[] SamplerWraps = { 10497, 33071, 33648 }; // repeat, clamp, mirrored
 
@@ -56,7 +58,7 @@ internal sealed unsafe class Renderer : IDisposable
         public bool GpuSkinned;
     }
 
-    public Renderer(GL gl, GltfModel model, ImageResult?[]? decodedTextures = null)
+    public Renderer(GL gl, GltfModel model, ImageResult?[]? decodedTextures = null, bool animate = true)
     {
         _gl = gl;
         _model = model;
@@ -64,19 +66,42 @@ internal sealed unsafe class Renderer : IDisposable
         _textureIds = new int[model.Textures.Count];
         Array.Fill(_textureIds, -1);
         _srgbTextures = TextureColorSpace.SrgbTextureIndices(model.Materials);
-        _gpuSkinning = model.Animations.Count > 0;
+        _gpuSkinning = animate && model.Animations.Count > 0;
         if (_gpuSkinning)
         {
-            _jointUbo = _gl.GenBuffer();
-            _gl.BindBuffer(BufferTargetARB.UniformBuffer, _jointUbo);
-            _gl.BufferData(BufferTargetARB.UniformBuffer, (nuint)(MaxJoints * 16 * sizeof(float)), null, BufferUsageARB.DynamicDraw);
-            var blockIndex = _gl.GetUniformBlockIndex(_program, "JointBlock");
-            if (blockIndex != 0xFFFFFFFF) // GL_INVALID_INDEX: block not present (e.g. solid diagnostic shader)
+            // Joint palette as a texture buffer (RGBA32F, four texels per mat4). A
+            // uniform block would be simpler but is only guaranteed to hold 256 mat4s,
+            // which silently froze joints beyond that (the eagle's 287-joint feather
+            // skin sat rigid at bind pose). Buffer textures have a far higher floor.
+            var needed = 1;
+            foreach (var skin in model.Skins)
             {
-                _gl.UniformBlockBinding(_program, blockIndex, 0);
+                needed = Math.Max(needed, skin.JointNodes.Count);
             }
 
-            _gl.BindBufferBase(BufferTargetARB.UniformBuffer, 0, _jointUbo);
+            var capacity = (int)(_gl.GetInteger(GetPName.MaxTextureBufferSize) / 4); // RGBA texels -> mat4s
+            _jointCapacity = Math.Min(needed, capacity);
+            if (_jointCapacity < needed)
+            {
+                Console.Error.WriteLine(
+                    $"warning: model needs {needed} joints but this GPU's texture buffer holds {_jointCapacity}; "
+                    + $"only the first {_jointCapacity} animate.");
+            }
+
+            _jointScratch = new Matrix4x4[_jointCapacity];
+            _jointTbo = _gl.GenBuffer();
+            _gl.BindBuffer(BufferTargetARB.TextureBuffer, _jointTbo);
+            _gl.BufferData(BufferTargetARB.TextureBuffer, (nuint)(_jointCapacity * 16 * sizeof(float)), null, BufferUsageARB.DynamicDraw);
+            _jointPaletteTex = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.TextureBuffer, _jointPaletteTex);
+            _gl.TexBuffer((GLEnum)TextureTarget.TextureBuffer, (GLEnum)InternalFormat.Rgba32f, _jointTbo);
+            _gl.UseProgram(_program);
+            SetInt("uJointPalette", JointPaletteUnit);
+        }
+        else
+        {
+            _jointCapacity = 0;
+            _jointScratch = Array.Empty<Matrix4x4>();
         }
         foreach (var shared in TextureColorSpace.SharedUsage(model.Materials))
         {
@@ -419,13 +444,14 @@ internal sealed unsafe class Renderer : IDisposable
                     if (gpuSkinned)
                     {
                         // Joints are indices into the skin's palette; slots pointing outside
-                        // what the palette can address (invalid or beyond MaxJoints) drop out
-                        // here exactly as SkinMatrix does on the CPU — and the index is
-                        // sanitised to 0 too, because GLSL reads all four slots regardless
-                        // of weight and an out-of-range uJoints[] read is undefined.
+                        // what the palette can address (invalid or beyond the buffer's
+                        // capacity) drop out here exactly as SkinMatrix does on the CPU —
+                        // and the index is sanitised to 0 too, because GLSL reads all four
+                        // slots regardless of weight and an out-of-range texelFetch is
+                        // undefined.
                         var joints = prim.Joints![i];
                         var weights = prim.Weights![i];
-                        var jointCount = Math.Min(jointMatrices!.Length, MaxJoints);
+                        var jointCount = Math.Min(jointMatrices!.Length, _jointCapacity);
                         jx[0] = joints.X;
                         jx[1] = joints.Y;
                         jx[2] = joints.Z;
@@ -436,7 +462,10 @@ internal sealed unsafe class Renderer : IDisposable
                         wx[3] = MathF.Max(weights.W, 0f);
                         for (var s = 0; s < 4; s++)
                         {
-                            if (jx[s] < 0f || jx[s] >= jointCount)
+                            // Positive form: NaN fails both comparisons, so the negation
+                            // rejects it too (a NaN index would make the shader's int()
+                            // conversion and the texelFetch index undefined).
+                            if (!(jx[s] >= 0f && jx[s] < jointCount))
                             {
                                 wx[s] = 0f;
                                 jx[s] = 0f;
@@ -538,26 +567,23 @@ internal sealed unsafe class Renderer : IDisposable
 
     /// <summary>
     /// Computes and uploads a skin's joint palette (inverseBind x jointWorld) for the
-    /// current pose. Clamped to <see cref="MaxJoints"/>: oversized rigs fall back to
-    /// lower joints rather than overflowing the uniform block.
+    /// current pose. Clamped to the buffer's capacity (sized to the model's largest
+    /// skin): oversized rigs keep their lower joints rather than overflowing.
     /// </summary>
     private void UploadJointPalette(ScenePose pose, int skinIndex)
     {
         var skin = _model.Skins[skinIndex];
-        var count = Math.Min(skin.JointNodes.Count, MaxJoints);
-        if (skin.JointNodes.Count > MaxJoints)
-        {
-            Console.Error.WriteLine(
-                $"warning: skin '{skin.Name ?? skinIndex.ToString()}' has {skin.JointNodes.Count} joints; "
-                + $"only the first {MaxJoints} animate.");
-        }
+        var count = Math.Min(skin.JointNodes.Count, _jointCapacity);
 
         pose.JointMatrices(skin, _jointScratch.AsSpan(0, count));
-        _gl.BindBuffer(BufferTargetARB.UniformBuffer, _jointUbo);
+        _gl.BindBuffer(BufferTargetARB.TextureBuffer, _jointTbo);
         fixed (Matrix4x4* p = _jointScratch)
         {
-            _gl.BufferSubData(BufferTargetARB.UniformBuffer, 0, (nuint)(count * 16 * sizeof(float)), p);
+            _gl.BufferSubData(BufferTargetARB.TextureBuffer, 0, (nuint)(count * 16 * sizeof(float)), p);
         }
+
+        _gl.ActiveTexture(TextureUnit.Texture0 + JointPaletteUnit);
+        _gl.BindTexture(TextureTarget.TextureBuffer, _jointPaletteTex);
     }
 
     /// <summary>Weighted skin matrix for one vertex: sum of w * (inverseBind * jointWorld) over 4 joints.</summary>
@@ -906,6 +932,12 @@ internal sealed unsafe class Renderer : IDisposable
             {
                 _gl.DeleteTexture((uint)id);
             }
+        }
+
+        if (_jointPaletteTex != 0)
+        {
+            _gl.DeleteTexture(_jointPaletteTex);
+            _gl.DeleteBuffer(_jointTbo);
         }
 
         _gl.DeleteProgram(_program);

@@ -27,9 +27,20 @@ internal static class ShaderSources
         layout (location = 6) in vec4 aJoints;
         layout (location = 7) in vec4 aWeights;
 
-        // Skinning palette: inverseBind x jointWorld per joint, uploaded per frame.
-        const int MAX_JOINTS = 256;
-        layout (std140) uniform JointBlock { mat4 uJoints[MAX_JOINTS]; };
+        // Skinning palette: inverseBind x jointWorld per joint, uploaded per frame to a
+        // texture buffer (RGBA32F, four texels per mat4). A buffer texture, not a uniform
+        // block: blocks are only guaranteed to hold 256 mat4s, which real rigs exceed
+        // (the eagle's feather skin has 287 joints and froze at the old cap).
+        uniform samplerBuffer uJointPalette;
+
+        mat4 GetJoint(int i)
+        {
+            return mat4(
+                texelFetch(uJointPalette, i * 4 + 0),
+                texelFetch(uJointPalette, i * 4 + 1),
+                texelFetch(uJointPalette, i * 4 + 2),
+                texelFetch(uJointPalette, i * 4 + 3));
+        }
 
         uniform mat4 uModel;
         uniform mat4 uView;
@@ -57,10 +68,10 @@ internal static class ShaderSources
                 float wsum = w.x + w.y + w.z + w.w;
                 if (wsum > 0.0)
                 {
-                    mat4 skin = (w.x * uJoints[int(aJoints.x)]
-                        + w.y * uJoints[int(aJoints.y)]
-                        + w.z * uJoints[int(aJoints.z)]
-                        + w.w * uJoints[int(aJoints.w)]) / wsum;
+                    mat4 skin = (w.x * GetJoint(int(aJoints.x))
+                        + w.y * GetJoint(int(aJoints.y))
+                        + w.z * GetJoint(int(aJoints.z))
+                        + w.w * GetJoint(int(aJoints.w))) / wsum;
                     localPosition = (skin * vec4(aPosition, 1.0)).xyz;
                     localNormal = mat3(skin) * aNormal;
                     localTangent = mat3(skin) * aTangent.xyz;

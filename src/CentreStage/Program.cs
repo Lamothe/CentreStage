@@ -33,6 +33,7 @@ internal static class Program
         var frames = int.TryParse(GetOption(args, "--frames"), out var f) ? Math.Max(f, 1) : 3;
         var anim = int.TryParse(GetOption(args, "--anim"), out var a) ? a : 0;
         var time = float.TryParse(GetOption(args, "--time"), out var t) ? t : 0f;
+        var noAnim = args.Contains("--no-anim");
         var path = args.FirstOrDefault(x => !x.StartsWith("--", StringComparison.Ordinal)
             && !IsOptionValue(args, x, "--capture", "--frames", "--anim", "--time"));
         if (path is null)
@@ -68,11 +69,11 @@ internal static class Program
                 return;
             }
 
-            RunCapture(path, model, capture!, frames, anim, time);
+            RunCapture(path, model, capture!, frames, anim, time, !noAnim);
             return;
         }
 
-        RunViewer(path);
+        RunViewer(path, !noAnim);
     }
 
     private static void Inspect(string path, GltfModel model)
@@ -132,7 +133,10 @@ internal static class Program
 
                     var idxMax = prim.Indices.Max();
                     var idxFirst = string.Join(",", prim.Indices.Take(9));
-                    Console.WriteLine($"  mesh[{mi}] prim[{pi}] verts={prim.Positions.Length} idx={prim.Indices.Length} mode={prim.Mode} idxMax={idxMax} first=[{idxFirst}] raw bounds ({min:F3}) .. ({max:F3})");
+                    var jmax = prim.Joints is { } jn
+                        ? jn.Max(j => MathF.Max(MathF.Max(j.X, j.Y), MathF.Max(j.Z, j.W)))
+                        : -1f;
+                    Console.WriteLine($"  mesh[{mi}] prim[{pi}] verts={prim.Positions.Length} idx={prim.Indices.Length} mode={prim.Mode} idxMax={idxMax} jmax={jmax} first=[{idxFirst}] raw bounds ({min:F3}) .. ({max:F3})");
                 }
             }
         }
@@ -229,7 +233,7 @@ internal static class Program
     /// Offscreen render: hidden window, draw a few frames, read the framebuffer to a PNG.
     /// Used for verification without putting windows on any display.
     /// </summary>
-    private static unsafe void RunCapture(string path, GltfModel model, string outputPath, int frames, int animIndex = 0, float time = 0f)
+    private static unsafe void RunCapture(string path, GltfModel model, string outputPath, int frames, int animIndex = 0, float time = 0f, bool animate = true)
     {
         var options = WindowOptions.Default with
         {
@@ -251,12 +255,12 @@ internal static class Program
         {
             gl = window.CreateOpenGL();
             var decoded = Renderer.DecodeTextures(model.Textures);
-            renderer = new Renderer(gl, model, decoded);
+            renderer = new Renderer(gl, model, decoded, animate);
             camera.FrameBounds(renderer.Bounds.min, renderer.Bounds.max);
             Console.WriteLine($"  bounds: ({renderer.Bounds.min:F2}) .. ({renderer.Bounds.max:F2})");
             Console.WriteLine($"  camera: pos=({camera.Position:F2}) dist={camera.Distance:F2}");
 
-            if (model.Animations.Count > 0)
+            if (animate && model.Animations.Count > 0)
             {
                 pose = new ScenePose(model);
                 var index = Math.Clamp(animIndex, 0, model.Animations.Count - 1);
@@ -359,7 +363,7 @@ internal static class Program
     /// objects are released in <see cref="IWindow.Closing"/> while the context is still
     /// current — deleting them after the event loop exits crashes the driver lookup.
     /// </summary>
-    private static void RunViewer(string path)
+    private static void RunViewer(string path, bool animate = true)
     {
         var options = WindowOptions.Default with
         {
@@ -518,8 +522,8 @@ internal static class Program
                 // stream in from the decode queue a couple per frame.
                 if (renderer is null && loaded is not null)
                 {
-                    renderer = new Renderer(gl, loaded);
-                    playback = new AnimationPlayback(loaded);
+                    renderer = new Renderer(gl, loaded, animate: animate);
+                    playback = animate ? new AnimationPlayback(loaded) : null;
                     camera.FrameBounds(renderer.Bounds.min, renderer.Bounds.max);
                     window.Title = $"Centre Stage — {Path.GetFileName(path)}";
                 }

@@ -178,6 +178,12 @@ FOCUS_Y=0
 
 launch() { # launch <log-file> [env VAR=...]
     local log="$1"; shift
+    # Wake preamble: the first scenario after a long idle has repeatedly
+    # lost all input (events never reach the window). Poke the session,
+    # then park on the secondary display.
+    start_daemon
+    yd key --key-delay 100 42:1 42:0          # a harmless Shift tap
+    sleep 2
     yd mousemove --absolute -x 4400 -y 540   # park on the secondary display
     ( cd "$ROOT" &&
       env CENTRESTAGE_WINDOW_POS=3480,120 CENTRESTAGE_LOG_KEYS=1 \
@@ -191,7 +197,8 @@ launch() { # launch <log-file> [env VAR=...]
 }
 
 grab_focus() { # grab_focus <log-file> — F12 probe sweep; sets FOCUS_X/Y.
-    local log="$1" before after x y
+    local log="$1" before after x y attempt
+  for attempt in 1 2; do
     sleep 12                                   # the proven-delivery window after launch
     before=$(shots_in "$log")
     # Click + F12 probe: the click gives the window under the pointer keyboard
@@ -214,6 +221,8 @@ grab_focus() { # grab_focus <log-file> — F12 probe sweep; sets FOCUS_X/Y.
             fi
         done
     done
+    start_daemon                              # second attempt: fresh daemon
+  done
     return 1
 }
 
@@ -290,7 +299,9 @@ run_A() {
 run_B() {
     say "scenario B: Escape while a frame is in flight"
     local BLOG="$OUT/B-midflight-close.log"
-    launch "$BLOG"
+    # The synthetic pipeline's ~9 s frames are the only "mid-flight" window
+    # (the demo transform completes in ~0.04 s at the new geometry).
+    launch "$BLOG" CENTRESTAGE_DLSS_SYNTHETIC=1
     check "B: the app received input (F12 self-screenshot)" grab_focus "$BLOG"
     local shots_before
     shots_before=$(shots_in "$BLOG")
@@ -322,7 +333,7 @@ deferral_before_completion() { # deferral_before_completion <log-file> — the
 run_C() {
     say "scenario C: fault injection (CENTRESTAGE_DLSS_FAULT=throw-once) + retry"
     local CLOG="$OUT/C-fault-injection.log"
-    launch "$CLOG" CENTRESTAGE_DLSS_FAULT=throw-once
+    launch "$CLOG" CENTRESTAGE_DLSS_SYNTHETIC=1 CENTRESTAGE_DLSS_FAULT=throw-once
     check "C: the app received input (F12 self-screenshot)" grab_focus "$CLOG"
     re_focus
     send_key 67                                    # F9 -> the injected fault
@@ -337,11 +348,36 @@ run_C() {
     check "C: clean exit after Escape" close_app "$CLOG"
 }
 
+run_D() {
+    say "scenario D: the F10 A/B toggle (the visible improvement path)"
+    local DLOG="$OUT/D-ab-toggle.log"
+    launch "$DLOG"
+    check "D: the app received input (F12 self-screenshot)" grab_focus "$DLOG"
+    re_focus
+    send_key 67                                    # F9 -> one frame
+    check "D: F9 reached the seam through the key wiring" \
+        wait_log "$DLOG" "dlss: F9 requested one frame" 10
+    check "D: the frame was processed (worker + presenter)" \
+        wait_log "$DLOG" "dlss: frame 1 processed" 90
+    re_focus
+    send_key 68                                    # F10 -> the A/B swap
+    check "D: F10 swapped the presented view to the bilinear baseline" \
+        wait_log "$DLOG" "F10 -> view: bilinear baseline" 12
+    check "D: the swapped view was screenshot (F12 key path)" f12_shoot "$DLOG"
+    check "D: the swapped capture has real content (non-blank)" shot_has_content "$DLOG"
+    re_focus
+    send_key 68                                    # F10 -> back
+    check "D: F10 swapped back to the Lanczos3 demonstration" \
+        wait_log "$DLOG" "F10 -> view: Lanczos3" 12
+    check "D: clean exit after Escape" close_app "$DLOG"
+}
+
 case "$ONLY" in
     A) run_A ;;
     B) run_B ;;
     C) run_C ;;
-    *) run_A; run_B; run_C ;;
+    D) run_D ;;
+    *) run_A; run_B; run_C; run_D ;;
 esac
 
 # --- summary ---------------------------------------------------------------

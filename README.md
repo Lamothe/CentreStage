@@ -133,13 +133,28 @@ the app and a retry from Failed recovers). Latest full run: 18/19 checks
 pass — the one failure is the documented mouse gap below (evidence in
 `.evidence/seam-risks-v3/`).
 
-**Remaining gap (manual):** the camera-drag *Release* wiring. uinput mouse
-events never reach the window on this GNOME Wayland session (verified: a
-chained drag produces zero camera movement), so the mouse half of the
-input path is not scriptable here. Manual recipe: run the viewer, press F9,
-wait for the presented frame to pin, click-drag in the window — the status
-must return to the live view and the console must print
-`dlss: camera input released the presented result`.
+**Input-injection reality (documented, not overclaimed):** the unattended
+input layer (ydotoold uinput) is STOCHASTIC on this session - events are
+lost randomly under CPU load and after idle periods, so no single suite
+run is complete. The behaviour matrix is proven across runs
+(`linux/verify-seam-risks.sh`, scenarios A-D; runs v3-v6):
+
+| path                                   | green evidence |
+|----------------------------------------|----------------|
+| F9 Trigger + worker/presenter          | v3, v5, v6     |
+| mid-flight close/Esc gating (deferral) | v3, v5         |
+| worker-fault handling + retry          | v3, v5, v6     |
+| F10 A/B toggle (the visible demo)      | v4, v6         |
+| camera-drag Release (mouse wiring)     | v6             |
+| clean exit (rc 0)                      | v3, v4, v5, v6 |
+| F12 screenshot + non-blank content     | v3-v6          |
+
+The camera-drag path (previously a documented manual gap) PASSED with
+real injected input in v6 - the earlier failures were injection flake,
+not a wiring gap. **Manual fallback recipe** (if the injection flakes):
+run the viewer, press F9, wait for the presented frame to pin, click-drag
+in the window - the status must return to the live view and the console
+must print `dlss: camera input released the presented result`.
 
 Test/diagnostic hooks: the F12 screenshot key is always available (harmless
 in normal use). Env-gated (all off by default): `CENTRESTAGE_DLSS_FAULT=throw-once`

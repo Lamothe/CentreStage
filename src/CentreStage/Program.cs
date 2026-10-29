@@ -404,6 +404,8 @@ internal static class Program
         var decodeFailed = 0;
         var stage = LoadStage.Loading;
         var closeRequested = false;
+        var closeDeferralLogged = false;
+        string? shotPending = null;
         var closingPainted = false;
         var loadFailed = false;
         var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -480,7 +482,14 @@ internal static class Program
                 }
             }
             HookInput(window, camera, () => closeRequested = true, () => playback,
-                onDlssFrame: () => dlss?.Trigger(), onCameraInput: () => dlss?.Release());
+                onDlssFrame: () => dlss?.Trigger(), onCameraInput: () => dlss?.Release(),
+                onScreenshot: () =>
+                {
+                    // Captured at end of frame (see the capture subscription
+                    // below), where the back buffer holds the completed frame.
+                    var dir = Environment.GetEnvironmentVariable("CENTRESTAGE_SHOT_DIR") ?? "shots";
+                    shotPending = Path.Combine(dir, $"shot-{DateTime.Now:yyyyMMdd-HHmmss-fff}.png");
+                });
         };
 
         window.Render += delta =>
@@ -511,6 +520,14 @@ internal static class Program
                 if (dlss is not { IsEvaluating: true })
                 {
                     stage = LoadStage.Closing;
+                }
+                else if (!closeDeferralLogged)
+                {
+                    // Observable for the unattended seam-risk run: a close
+                    // request handled while a frame is in flight is deferred,
+                    // not silently dropped.
+                    closeDeferralLogged = true;
+                    Console.WriteLine("dlss: close deferred while a frame is in flight");
                 }
             }
 
@@ -643,6 +660,28 @@ internal static class Program
             }
         };
 
+        // End-of-frame screenshot capture: subscribed after the main draw so it
+        // runs on every path (ready/status/error) with the completed frame in
+        // the back buffer. A capture failure is logged, never fatal.
+        window.Render += _ =>
+        {
+            if (shotPending is not { } pending || gl is null)
+            {
+                return;
+            }
+            shotPending = null;
+            try
+            {
+                var size = window.FramebufferSize;
+                Screenshot.SavePng(gl, pending, size.X, size.Y);
+                Console.WriteLine($"  screenshot: {pending}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"error: screenshot '{pending}' failed: {ex.Message}");
+            }
+        };
+
         window.FramebufferResize += size =>
         {
             gl?.Viewport(size);
@@ -653,6 +692,10 @@ internal static class Program
             // Fired for the close button too, where no further frame can be drawn:
             // GL teardown must still happen before the context dies. Completing the
             // queue here also unblocks any decoder still waiting on a full queue.
+            // The close button cannot be deferred (Silk.NET's Closing is not
+            // cancellable): if it lands while a frame is evaluating, teardown
+            // blocks for at most the remaining evaluation time (~9 s bounded,
+            // the worker is CPU-only and its fault is observed by the Wait).
             CompleteQueue();
             ReleaseGl(ref renderer, ref overlay, ref dlss);
         };
@@ -701,7 +744,8 @@ internal static class Program
     }
 
     private static void HookInput(IWindow window, OrbitCamera camera, Action requestClose,
-        Func<AnimationPlayback?>? playback = null, Action? onDlssFrame = null, Action? onCameraInput = null)
+        Func<AnimationPlayback?>? playback = null, Action? onDlssFrame = null, Action? onCameraInput = null,
+        Action? onScreenshot = null)
     {
         var input = window.CreateInput();
         var getPlayback = playback;
@@ -727,13 +771,22 @@ internal static class Program
         // without a pointer device, so it must not be behind the mouse guard.
         foreach (var keyboard in input.Keyboards)
         {
-            keyboard.KeyDown += (_, key, _) =>
+            var logKeys = Environment.GetEnvironmentVariable("CENTRESTAGE_LOG_KEYS") == "1";
+            keyboard.KeyDown += (_, key, code) =>
             {
+                if (logKeys)
+                {
+                    Console.WriteLine($"key: {key} code: {code}");
+                }
                 if (key == Key.Escape)
                 {
                     // Ask the render loop to paint a closing status first; window.Close()
                     // from here would skip straight to teardown.
                     requestClose();
+                }
+                else if (key == Key.F12)
+                {
+                    onScreenshot?.Invoke();
                 }
                 else if (key == Key.F11)
                 {

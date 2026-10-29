@@ -9,3 +9,4 @@ src/CentreStage/runtimes/
 # Local run evidence (screenshots, reports, probes) — referenced by the
 # campaign handover's paths, never committed.
 .evidence/
+.tools/

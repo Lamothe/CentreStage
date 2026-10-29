@@ -33,7 +33,8 @@ dotnet run --project src/CentreStage -- <model.glb> --dlss-demo outdir  # unatte
 ```
 
 Mouse: left-drag orbit, right/middle-drag pan, scroll zoom, double-click or F11 toggles
-fullscreen, F9 processes one frame through the DLSS seam (see below), Esc quits. The
+fullscreen, F9 processes one frame through the DLSS seam (see below), F12 saves a
+screenshot of the frame just drawn (`CENTRESTAGE_SHOT_DIR`, default `./shots`), Esc quits. The
 interactive viewer opens immediately and shows progress ("Parsing",
 "Uploading textures n/N", "Closing") via an antialiased TrueType status overlay
 (rasterised from a system sans face; a small bitmap font is the last-resort fallback):
@@ -84,12 +85,51 @@ input (or F9 again) returns to the live view; the temporal sequence
 continues across frames. Nothing changes when the seam is idle.
 
 `--dlss-demo outdir` drives the same path unattended: it screenshots the
-live view (`live.png`), processes one frame, screenshots the presented
-result (`processed.png`, label in-band), writes `report.txt` (label,
-geometry, measured latency, counter, arena high-water) and closes. Env:
-`CENTRESTAGE_DLSS_LIB` (explicit library path), `CENTRESTAGE_WINDOW_POS`
+live view (`live.png`), the in-flight frame (`processing.png`) and the
+presented result (`processed.png`, label in-band), writes `report.txt`
+(label, geometry, measured latency, counter, arena high-water) and closes.
+Env: `CENTRESTAGE_DLSS_LIB` (explicit library path), `CENTRESTAGE_WINDOW_POS`
 ("x,y" window placement — honoured on X11/XWayland; the unattended runs
 park the window on the secondary display).
+
+### Seam-risk verification and test hooks
+
+`bash linux/verify-seam-risks.sh [evidence-dir]` verifies the seam's risky
+paths behaviourally with real injected input (ydotool/uinput; `CENTRESTAGE_RISK_ONLY=A|B|C`
+runs one scenario): **A** — F9 Trigger wiring, the worker+presenter path and
+Esc close; **B** — the mid-flight close gating: the Esc is sent while a frame
+is evaluating and the app's own "close deferred" line must precede the
+"frame 1 processed" line (proving the request was handled mid-flight and the
+teardown was deferred), the app keeps painting, completes the frame and
+exits 0 (the exit code is checked);
+**C** — the worker-fault path (`CENTRESTAGE_DLSS_FAULT=throw-once` makes the
+first evaluation fault on the worker; the fault is handled without crashing
+the app and a retry from Failed recovers). Latest full run: 18/19 checks
+pass — the one failure is the documented mouse gap below (evidence in
+`.evidence/seam-risks-v3/`).
+
+**Remaining gap (manual):** the camera-drag *Release* wiring. uinput mouse
+events never reach the window on this GNOME Wayland session (verified: a
+chained drag produces zero camera movement), so the mouse half of the
+input path is not scriptable here. Manual recipe: run the viewer, press F9,
+wait for the presented frame to pin, click-drag in the window — the status
+must return to the live view and the console must print
+`dlss: camera input released the presented result`.
+
+Test/diagnostic hooks: the F12 screenshot key is always available (harmless
+in normal use). Env-gated (all off by default): `CENTRESTAGE_DLSS_FAULT=throw-once`
+(fault injection for the worker path), `CENTRESTAGE_LOG_KEYS=1` (log key
+events), `CENTRESTAGE_SHOT_DIR` (screenshot directory),
+`CENTRESTAGE_AUTO_CLOSE_MS` (automatic close for unattended runs). The
+window-close button cannot be deferred (Silk.NET's Closing event is not
+cancellable): pressed while a frame is evaluating, teardown blocks for at
+most the remaining evaluation time (~9 s, bounded; the worker is CPU-only
+and its fault is observed) — Esc/auto-close defer instead and exit 0. Tooling notes for the automation:
+ydotoold 1.0.4 silently dries up after the first key event (the runner gives
+every key a fresh daemon), fast press+release pairs are dropped (the runner
+uses `--key-delay`), xdotool cannot inject into Wayland windows, and the
+session's launch-focus grant is unreliable (the runner clicks the window
+before keys that must land).
 
 ## Extension support
 

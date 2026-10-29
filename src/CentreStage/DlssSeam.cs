@@ -61,14 +61,29 @@ internal sealed class DlssSeam : IDisposable
     /// <summary>The in-band label shown with every presented frame.</summary>
     public static string Label => Dlss5Pipeline.Label;
 
+    /// <summary>
+    /// Test-only fault injection (off by default): CENTRESTAGE_DLSS_FAULT=throw-once
+    /// makes the first evaluation fault on the worker, exercising the
+    /// faulted-worker path; later evaluations succeed so recovery is testable.
+    /// </summary>
+    private static int s_faultPending =
+        Environment.GetEnvironmentVariable("CENTRESTAGE_DLSS_FAULT") == "throw-once" ? 1 : 0;
+
     /// <summary>Keyboard/camera trigger: process one frame, or unpin the result.</summary>
     public void Trigger()
     {
         if (_state == State.Presenting)
         {
             _state = State.Idle;
+            Console.WriteLine("dlss: F9 unpinned the presented result");
             return;
         }
+        if (_state == State.Processing)
+        {
+            Console.WriteLine("dlss: F9 ignored (a frame is already in flight)");
+            return;
+        }
+        Console.WriteLine("dlss: F9 requested one frame");
         RequestFrame();
     }
 
@@ -78,6 +93,7 @@ internal sealed class DlssSeam : IDisposable
         if (_state == State.Presenting)
         {
             _state = State.Idle;
+            Console.WriteLine("dlss: camera input released the presented result");
         }
     }
 
@@ -132,6 +148,11 @@ internal sealed class DlssSeam : IDisposable
                 // The authoritative latency is measured around the native
                 // call on the worker: the render loop's cadence (throttled
                 // while the session is idle-blanked) must never inflate it.
+                if (Interlocked.Exchange(ref s_faultPending, 0) == 1)
+                {
+                    throw new InvalidOperationException(
+                        "fault injection: CENTRESTAGE_DLSS_FAULT=throw-once");
+                }
                 var clock = Stopwatch.StartNew();
                 var output = new byte[capture.Length];
                 var status = pipeline.Evaluate(capture, output, reset);
@@ -302,22 +323,20 @@ internal sealed class DlssSeam : IDisposable
         Console.WriteLine(report);
     }
 
-    /// <summary>Reads the current framebuffer and writes it as a PNG (GL rows are bottom-up).</summary>
-    private unsafe void SavePng(string path, int width, int height)
+    private void SavePng(string path, int width, int height)
     {
-        var pixels = new byte[width * height * 4];
-        fixed (byte* p = pixels)
+        // Evidence capture: a write failure fails the run but must never take
+        // down the render loop mid-demo.
+        try
         {
-            _gl.ReadPixels(0, 0, (uint)width, (uint)height, PixelFormat.Rgba, PixelType.UnsignedByte, p);
+            Screenshot.SavePng(_gl, path, width, height);
+            return;
         }
-        var rowBytes = width * 4;
-        var flipped = new byte[pixels.Length];
-        for (var y = 0; y < height; y++)
+        catch (Exception ex)
         {
-            Array.Copy(pixels, y * rowBytes, flipped, (height - 1 - y) * rowBytes, rowBytes);
+            Console.Error.WriteLine($"error: screenshot '{path}' failed: {ex.Message}");
+            Environment.ExitCode = 3;
         }
-        using var stream = File.Create(path);
-        new ImageWriter().WritePng(flipped, width, height, ColorComponents.RedGreenBlueAlpha, stream);
         Console.WriteLine($"  dlss demo: captured {width}x{height} -> {path}");
     }
 

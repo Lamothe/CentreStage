@@ -30,12 +30,13 @@ internal static class Program
 
         var inspect = args.Contains("--inspect");
         var capture = GetOption(args, "--capture");
+        var dlssDemo = GetOption(args, "--dlss-demo");
         var frames = int.TryParse(GetOption(args, "--frames"), out var f) ? Math.Max(f, 1) : 3;
         var anim = int.TryParse(GetOption(args, "--anim"), out var a) ? a : 0;
         var time = float.TryParse(GetOption(args, "--time"), out var t) ? t : 0f;
         var noAnim = args.Contains("--no-anim");
         var path = args.FirstOrDefault(x => !x.StartsWith("--", StringComparison.Ordinal)
-            && !IsOptionValue(args, x, "--capture", "--frames", "--anim", "--time"));
+            && !IsOptionValue(args, x, "--capture", "--frames", "--anim", "--time", "--dlss-demo"));
         if (path is null)
         {
             Console.Error.WriteLine("error: no model path given.");
@@ -73,7 +74,7 @@ internal static class Program
             return;
         }
 
-        RunViewer(path, !noAnim);
+        RunViewer(path, !noAnim, dlssDemo);
     }
 
     private static void Inspect(string path, GltfModel model)
@@ -154,6 +155,9 @@ internal static class Program
         Console.WriteLine("usage: CentreStage <model.glb|model.gltf> [--inspect]");
         Console.WriteLine("       CentreStage --inspect <model.glb>");
         Console.WriteLine("       CentreStage <model.glb> --capture out.png [--frames N]");
+        Console.WriteLine("       CentreStage <model.glb> --dlss-demo outdir   (unattended: live + processed evidence)");
+        Console.WriteLine("viewer: F9 processes one frame through the dlss5-linux native pipeline (seconds per frame,");
+        Console.WriteLine("        frame-by-frame, not real-time; synthetic weights - arbitrary transform).");
     }
 
     /// <summary>
@@ -364,7 +368,7 @@ internal static class Program
     /// objects are released in <see cref="IWindow.Closing"/> while the context is still
     /// current — deleting them after the event loop exits crashes the driver lookup.
     /// </summary>
-    private static void RunViewer(string path, bool animate = true)
+    private static void RunViewer(string path, bool animate = true, string? dlssDemoDir = null)
     {
         var options = WindowOptions.Default with
         {
@@ -373,12 +377,21 @@ internal static class Program
             API = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.ForwardCompatible, new APIVersion(3, 3)),
             VSync = true,
         };
+        // Optional placement hint (works on X11/XWayland; ignored on native
+        // Wayland): the unattended runs park the window on the secondary
+        // display via CENTRESTAGE_WINDOW_POS="x,y".
+        if (Environment.GetEnvironmentVariable("CENTRESTAGE_WINDOW_POS")?.Split(',') is [var xs, var ys]
+            && int.TryParse(xs, out var wx) && int.TryParse(ys, out var wy))
+        {
+            options = options with { Position = new Vector2D<int>(wx, wy) };
+        }
 
         var window = Window.Create(options);
         GL? gl = null;
         Renderer? renderer = null;
         StatusOverlay? overlay = null;
         AnimationPlayback? playback = null;
+        DlssSeam? dlss = null;
         var camera = new OrbitCamera();
 
         // Load pipeline: parse + texture decode run on a background thread; decoded
@@ -449,7 +462,25 @@ internal static class Program
         {
             gl = window.CreateOpenGL();
             overlay = new StatusOverlay(gl);
-            HookInput(window, camera, () => closeRequested = true, () => playback);
+            // The seam is optional: a construction failure (FBO/shader) must
+            // degrade to plain viewing, never kill the viewer. In demo mode
+            // there is nothing to evidence without it, so fail fast.
+            try
+            {
+                dlss = new DlssSeam(gl, dlssDemoDir);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"error: DLSS seam unavailable: {ex.Message}");
+                dlss = null;
+                if (dlssDemoDir is not null)
+                {
+                    Environment.ExitCode = 3;
+                    closeRequested = true;
+                }
+            }
+            HookInput(window, camera, () => closeRequested = true, () => playback,
+                onDlssFrame: () => dlss?.Trigger(), onCameraInput: () => dlss?.Release());
         };
 
         window.Render += delta =>
@@ -473,7 +504,14 @@ internal static class Program
             if (closeRequested && stage != LoadStage.Closing)
             {
                 // Esc is honoured from every stage, including the error screen.
-                stage = LoadStage.Closing;
+                // While a DLSS frame is in flight the closing stage (whose GL
+                // teardown would block the render thread for the rest of the
+                // evaluation) is deferred: the processing status keeps
+                // painting and the app closes the moment the frame lands.
+                if (dlss is not { IsEvaluating: true })
+                {
+                    stage = LoadStage.Closing;
+                }
             }
 
             if (stage == LoadStage.Failed)
@@ -496,7 +534,7 @@ internal static class Program
                     // Second pass: the status frame has been presented; tear down now,
                     // while the context is still current.
                     CompleteQueue();
-                    ReleaseGl(ref renderer, ref overlay);
+                    ReleaseGl(ref renderer, ref overlay, ref dlss);
                     window.Close();
                 }
 
@@ -572,18 +610,36 @@ internal static class Program
                 var sky = new Vector3(0.45f, 0.55f, 0.70f);
                 var ground = new Vector3(0.22f, 0.20f, 0.18f);
 
+                // The animation advances once per frame; both the normal draw
+                // and the DLSS capture pass render the same pose.
+                ScenePose? pose = null;
                 if (playback is not null && playback.HasAnimations)
                 {
                     playback.Advance((float)delta);
                     playback.Apply();
-                    renderer.Draw(camera, aspect, loaded.Lights, sky, ground, playback.Pose);
-                    overlay.DrawHud(width, height, playback.Describe(), 17f,
-                        new Vector4(0.80f, 0.85f, 0.93f, 0.92f));
+                    pose = playback.Pose;
                 }
-                else
+
+                // The DLSS seam draws its low-resolution capture pass through
+                // the same scene draw, and fills the frame when a processed
+                // result is pinned (the app's own drawing is skipped then).
+                var presenting = dlss is not null && dlss.BeginFrame(
+                    () => renderer.Draw(camera, aspect, loaded.Lights, sky, ground, pose),
+                    width, height);
+                if (!presenting)
                 {
-                    renderer.Draw(camera, aspect, loaded.Lights, sky, ground);
+                    if (playback is not null && playback.HasAnimations)
+                    {
+                        renderer.Draw(camera, aspect, loaded.Lights, sky, ground, pose);
+                        overlay.DrawHud(width, height, playback.Describe(), 17f,
+                            new Vector4(0.80f, 0.85f, 0.93f, 0.92f));
+                    }
+                    else
+                    {
+                        renderer.Draw(camera, aspect, loaded.Lights, sky, ground);
+                    }
                 }
+                dlss?.EndFrame(overlay, width, height, elapsed, () => closeRequested = true);
             }
         };
 
@@ -598,12 +654,12 @@ internal static class Program
             // GL teardown must still happen before the context dies. Completing the
             // queue here also unblocks any decoder still waiting on a full queue.
             CompleteQueue();
-            ReleaseGl(ref renderer, ref overlay);
+            ReleaseGl(ref renderer, ref overlay, ref dlss);
         };
 
         window.Run();
         CompleteQueue();
-        ReleaseGl(ref renderer, ref overlay);
+        ReleaseGl(ref renderer, ref overlay, ref dlss);
         window.Dispose();
 
         // Match the CLI paths: a failed load exits 2 even in interactive mode.
@@ -624,10 +680,12 @@ internal static class Program
     }
 
     /// <summary>Releases GL objects exactly once; safe to call from multiple teardown paths.</summary>
-    private static void ReleaseGl(ref Renderer? renderer, ref StatusOverlay? overlay)
+    private static void ReleaseGl(ref Renderer? renderer, ref StatusOverlay? overlay, ref DlssSeam? dlss)
     {
         renderer?.Dispose();
         renderer = null;
+        dlss?.Dispose();
+        dlss = null;
         overlay?.Dispose();
         overlay = null;
     }
@@ -642,7 +700,8 @@ internal static class Program
         return text.Length <= max ? text : text[..(max - 3)] + "...";
     }
 
-    private static void HookInput(IWindow window, OrbitCamera camera, Action requestClose, Func<AnimationPlayback?>? playback = null)
+    private static void HookInput(IWindow window, OrbitCamera camera, Action requestClose,
+        Func<AnimationPlayback?>? playback = null, Action? onDlssFrame = null, Action? onCameraInput = null)
     {
         var input = window.CreateInput();
         var getPlayback = playback;
@@ -679,6 +738,13 @@ internal static class Program
                 else if (key == Key.F11)
                 {
                     ToggleFullscreen();
+                }
+                else if (key == Key.F9)
+                {
+                    // One frame through the native pipeline (seconds per frame,
+                    // frame-by-frame), or back to the live view when a result
+                    // is pinned.
+                    onDlssFrame?.Invoke();
                 }
                 else if (getPlayback?.Invoke() is { HasAnimations: true } active)
                 {
@@ -765,12 +831,18 @@ internal static class Program
             {
                 // Y is negated for the Exhibit-style convention: dragging up looks up.
                 camera.Orbit(delta.X * 0.005f, -delta.Y * 0.005f);
+                onCameraInput?.Invoke();
             }
             else if (panning)
             {
                 camera.Pan(-delta.X, delta.Y);
+                onCameraInput?.Invoke();
             }
         };
-        primary.Scroll += (_, wheel) => camera.Zoom(wheel.Y * 0.25f);
+        primary.Scroll += (_, wheel) =>
+        {
+            camera.Zoom(wheel.Y * 0.25f);
+            onCameraInput?.Invoke();
+        };
     }
 }

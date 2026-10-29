@@ -1,7 +1,14 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\CentreStage.Core\CentreStage.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The built native host library (linux/build-native-host.sh output):
+         flows to build and publish output next to the app for the DLSS seam. -->
+    <None Update="runtimes\linux-x64\native\libdlss5_nr_host.so"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

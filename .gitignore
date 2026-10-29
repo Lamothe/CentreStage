@@ -3,3 +3,9 @@ obj/
 *.user
 .vs/
 .idea/
+# Built native artefacts (linux/build-native-host.sh output; rebuilt from the
+# dlss5-linux checkout, never committed).
+src/CentreStage/runtimes/
+# Local run evidence (screenshots, reports, probes) — referenced by the
+# campaign handover's paths, never committed.
+.evidence/

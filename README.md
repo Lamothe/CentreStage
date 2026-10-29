@@ -29,10 +29,12 @@ tests/CentreStage.Core.Tests/  xUnit tests over hand-built in-memory GLBs
 dotnet run --project src/CentreStage -- <model.glb>              # interactive viewer
 dotnet run --project src/CentreStage -- --inspect <model.glb>    # dump structure, no window
 dotnet run --project src/CentreStage -- <model.glb> --capture out.png   # offscreen render
+dotnet run --project src/CentreStage -- <model.glb> --dlss-demo outdir  # unattended DLSS evidence run
 ```
 
 Mouse: left-drag orbit, right/middle-drag pan, scroll zoom, double-click or F11 toggles
-fullscreen, Esc quits. The interactive viewer opens immediately and shows progress ("Parsing",
+fullscreen, F9 processes one frame through the DLSS seam (see below), Esc quits. The
+interactive viewer opens immediately and shows progress ("Parsing",
 "Uploading textures n/N", "Closing") via an antialiased TrueType status overlay
 (rasterised from a system sans face; a small bitmap font is the last-resort fallback):
 parsing and texture decoding run on a background thread, and textures upload
@@ -50,6 +52,44 @@ verify overlay text survives the renderer's GL state).
 `.desktop` entry and icon, and makes Centre Stage the default handler for `.glb`/`.gltf`
 (double-click in Files). Launching Centre Stage with no arguments opens a file picker.
 Re-run the script after pulling changes; it is idempotent.
+
+## DLSS seam (dlss5-linux native pipeline — synthetic weights)
+
+An optional seam wires the tested C host ABI of the dlss5-linux project
+(`vr/native-host.h`, built into `libdlss5_nr_host.so` by
+`linux/build-native-host.sh`; `DLSS5_LINUX=/path/to/dlss5-linux` selects the
+checkout): the current view is rendered into a 64x72 low-resolution
+framebuffer, read back, evaluated by the native CPU pipeline on a worker
+thread, and the returned frame is presented fullscreen (nearest upscale)
+with the in-band label in the status text.
+
+**This is on-demand frame-by-frame processing with visible latency — not
+real-time upscaling.** The evaluator costs seconds per frame (measured
+**8.7 s** worker wall-clock at the 64x72 demo geometry on an idle RTX 4070
+Ti SUPER host; ~10.8 s capture-to-presented). The boundary refuses frames
+whose padded extent exceeds its 320x320 working floor. Note: on a session
+that has gone idle-blanked (GNOME's idle-delay), the compositor throttles
+the window's render cadence — the screenshots and the evaluator still work,
+but the app itself paints rarely until the session wakes.
+The weights are SYNTHETIC: `dlss5_nr_label()` returns "synthetic weights —
+arbitrary transform" and the seam displays it with every presented frame.
+The transform really is arbitrary — with the seeded synthetic weights it
+rails some channels (e.g. G->0, B->255) while others track input structure.
+
+Workflow: **F9** captures the current view and starts one evaluation; the
+live view keeps rendering while "processing... seconds per frame, not
+real-time" shows; when the result arrives it pins fullscreen with the
+label, the measured latency and the frames-since-reset counter. Any camera
+input (or F9 again) returns to the live view; the temporal sequence
+continues across frames. Nothing changes when the seam is idle.
+
+`--dlss-demo outdir` drives the same path unattended: it screenshots the
+live view (`live.png`), processes one frame, screenshots the presented
+result (`processed.png`, label in-band), writes `report.txt` (label,
+geometry, measured latency, counter, arena high-water) and closes. Env:
+`CENTRESTAGE_DLSS_LIB` (explicit library path), `CENTRESTAGE_WINDOW_POS`
+("x,y" window placement — honoured on X11/XWayland; the unattended runs
+park the window on the secondary display).
 
 ## Extension support
 

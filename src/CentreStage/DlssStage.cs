@@ -4,11 +4,12 @@
 // The DLSS seam's GL side: render the scene into a low-resolution offscreen
 // framebuffer (the demo geometry's 64x72, the native boundary's documented
 // bound), read the RGB bytes back for the native pipeline, and present the
-// returned frame as a nearest-filtered fullscreen texture. The transform is
-// ARBITRARY (synthetic weights) and the evaluator costs seconds per frame —
-// this is on-demand frame-by-frame processing with visible latency, not
-// real-time upscaling; callers show the in-band label with every presented
-// frame (Dlss5Pipeline.Label).
+// returned frame as a nearest-filtered fullscreen texture. The transform
+// is the demonstration transform's real weights (NOT DLSS5) or the
+// synthetic pipeline's arbitrary one — either way this is on-demand
+// frame-by-frame processing with visible latency, not real-time
+// upscaling; callers show the mode's in-band label with every presented
+// frame (Dlss5Pipeline.LabelFor).
 using Silk.NET.OpenGL;
 
 namespace CentreStage;
@@ -101,16 +102,19 @@ internal sealed class DlssStage : IDisposable
     }
 
     /// <summary>Uploads one processed frame for presentation.</summary>
-    public unsafe void UploadResult(byte[] rgb)
+    public unsafe void UploadResult(byte[] rgb, int width, int height)
     {
-        if (rgb.Length != LowWidth * LowHeight * 3)
+        // The demonstration transform's result is larger than the capture
+        // (the documented scale x geometry); the presenter scales whatever
+        // extent arrives to the window.
+        if (width < 1 || height < 1 || rgb.Length != width * height * 3)
         {
-            throw new ArgumentException($"expected {LowWidth * LowHeight * 3} bytes", nameof(rgb));
+            throw new ArgumentException($"expected {width * height * 3} bytes", nameof(rgb));
         }
         fixed (byte* p = rgb)
         {
             _gl.BindTexture(TextureTarget.Texture2D, _resultTexture);
-            _gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgb8, LowWidth, LowHeight,
+            _gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgb8, (uint)width, (uint)height,
                 0, PixelFormat.Rgb, PixelType.UnsignedByte, p);
         }
     }

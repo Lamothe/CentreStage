@@ -156,8 +156,9 @@ internal static class Program
         Console.WriteLine("       CentreStage --inspect <model.glb>");
         Console.WriteLine("       CentreStage <model.glb> --capture out.png [--frames N]");
         Console.WriteLine("       CentreStage <model.glb> --dlss-demo outdir   (unattended: live + processed evidence)");
-        Console.WriteLine("viewer: F9 processes one frame through the dlss5-linux native pipeline (seconds per frame,");
-        Console.WriteLine("        frame-by-frame, not real-time; synthetic weights - arbitrary transform).");
+        Console.WriteLine("viewer: F9 processes one frame through the dlss5-linux native host (frame-by-frame,");
+        Console.WriteLine("        not real-time; demonstration transform - \"not DLSS5 - demonstration transform");
+        Console.WriteLine("        with real weights\").");
     }
 
     /// <summary>

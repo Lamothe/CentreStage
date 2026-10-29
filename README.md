@@ -54,35 +54,49 @@ verify overlay text survives the renderer's GL state).
 (double-click in Files). Launching Centre Stage with no arguments opens a file picker.
 Re-run the script after pulling changes; it is idempotent.
 
-## DLSS seam (dlss5-linux native pipeline — synthetic weights)
+## DLSS seam (dlss5-linux native host — demonstration transform, NOT DLSS5)
 
 An optional seam wires the tested C host ABI of the dlss5-linux project
 (`vr/native-host.h`, built into `libdlss5_nr_host.so` by
 `linux/build-native-host.sh`; `DLSS5_LINUX=/path/to/dlss5-linux` selects the
 checkout): the current view is rendered into a 64x72 low-resolution
-framebuffer, read back, evaluated by the native CPU pipeline on a worker
-thread, and the returned frame is presented fullscreen (nearest upscale)
-with the in-band label in the status text.
+framebuffer, read back, processed on a worker thread, and the returned
+frame is presented fullscreen with the in-band label in the status text.
 
-**This is on-demand frame-by-frame processing with visible latency — not
-real-time upscaling.** The evaluator costs seconds per frame (measured
-**8.7 s** worker wall-clock at the 64x72 demo geometry on an idle RTX 4070
-Ti SUPER host; ~10.8 s capture-to-presented). The boundary refuses frames
+By default the seam runs the **demonstration transform** (NOT DLSS5): a
+real openly documented Lanczos3 upscaler with real weights (dlss5-linux's
+`vr/NATIVE-DEMO-UPSCALE.md`) behind the identical ABI/capture/present
+path. Geometry: the 64x72 capture upscales x4 to a 256x288 presented
+frame. Measured quality (the harness's generated source vs a bilinear
+baseline): PSNR 14.79 vs 14.74 dB, SSIM 0.793 vs 0.776. The label the
+seam displays with every presented frame is exactly:
+
+    not DLSS5 - demonstration transform with real weights
+
+**Every presented frame carries that label. This proves the platform end
+to end; it is NOT a DLSS5 quality claim and must never be conflated with
+one.** Processing is frame-by-frame (F9-triggered) by design; the
+demonstration transform itself costs milliseconds at this geometry.
+
+The synthetic network path remains available (the mode-off fallback,
+`dlss5_nr_set_demo_transform(handle, 0)`): same-extent frames, temporally
+sequenced, with `dlss5_nr_label()` = "synthetic weights — arbitrary
+transform" — the synthetic weights really do make that transform
+arbitrary (it rails some channels). It costs seconds per frame (measured
+**8.7 s** worker wall-clock at the 64x72 demo geometry on an idle RTX
+4070 Ti SUPER; ~10.8 s capture-to-presented). The boundary refuses frames
 whose padded extent exceeds its 320x320 working floor. Note: on a session
 that has gone idle-blanked (GNOME's idle-delay), the compositor throttles
-the window's render cadence — the screenshots and the evaluator still work,
-but the app itself paints rarely until the session wakes.
-The weights are SYNTHETIC: `dlss5_nr_label()` returns "synthetic weights —
-arbitrary transform" and the seam displays it with every presented frame.
-The transform really is arbitrary — with the seeded synthetic weights it
-rails some channels (e.g. G->0, B->255) while others track input structure.
+the window's render cadence — the screenshots and the evaluator still
+work, but the app itself paints rarely until the session wakes.
 
-Workflow: **F9** captures the current view and starts one evaluation; the
-live view keeps rendering while "processing... seconds per frame, not
-real-time" shows; when the result arrives it pins fullscreen with the
-label, the measured latency and the frames-since-reset counter. Any camera
-input (or F9 again) returns to the live view; the temporal sequence
-continues across frames. Nothing changes when the seam is idle.
+Workflow: **F9** captures the current view and starts one processing run;
+the live view keeps rendering while "processing" shows; when the result
+arrives it pins fullscreen with the mode's label and the measured
+latency. Any camera input (or F9 again) returns to the live view. In the
+stateless demonstration mode the frames-since-reset counter stays 0; the
+synthetic path sequences temporally across frames. Nothing changes when
+the seam is idle.
 
 `--dlss-demo outdir` drives the same path unattended: it screenshots the
 live view (`live.png`), the in-flight frame (`processing.png`) and the

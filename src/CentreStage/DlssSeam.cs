@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Michael Lamothe
 //
 // The DLSS seam's workflow: on-demand frame-by-frame processing with VISIBLE
-// latency (the native evaluator costs seconds per frame at the 64x72 demo
+// latency (the demonstration transform costs milliseconds, the synthetic
 // geometry — it is never presented as real-time). One trigger captures the
 // current view into the low-resolution framebuffer, evaluates it on a worker
 // thread while the live view keeps rendering, then pins the returned frame as
@@ -59,7 +59,9 @@ internal sealed class DlssSeam : IDisposable
     }
 
     /// <summary>The in-band label shown with every presented frame.</summary>
-    public static string Label => Dlss5Pipeline.Label;
+    /// <summary>The label for the current mode (the demonstration
+    /// transform's mandatory label in demo mode).</summary>
+    public string Label => _pipeline?.LabelFor ?? Dlss5Pipeline.Label;
 
     /// <summary>
     /// Test-only fault injection (off by default): CENTRESTAGE_DLSS_FAULT=throw-once
@@ -111,7 +113,21 @@ internal sealed class DlssSeam : IDisposable
         }
         try
         {
-            _pipeline ??= new Dlss5Pipeline(DlssStage.LowWidth, DlssStage.LowHeight, threads: 8);
+            if (_pipeline is null)
+            {
+                _pipeline = new Dlss5Pipeline(DlssStage.LowWidth, DlssStage.LowHeight, threads: 8);
+                // The scope-pivot visible-quality path: the demonstration
+                // transform (NOT DLSS5 - real openly documented Lanczos3
+                // weights) runs behind the identical ABI/capture/present
+                // seam. Geometry: the 64x72 capture upscales 4x to a
+                // 256x288 presented frame. Frame-by-frame, not real-time.
+                var demoStatus = _pipeline.SetDemoTransform(4);
+                if (demoStatus != Dlss5Status.Ok)
+                {
+                    Console.Error.WriteLine(
+                        $"error: demo transform refused: {demoStatus}");
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -154,7 +170,7 @@ internal sealed class DlssSeam : IDisposable
                         "fault injection: CENTRESTAGE_DLSS_FAULT=throw-once");
                 }
                 var clock = Stopwatch.StartNew();
-                var output = new byte[capture.Length];
+                var output = new byte[pipeline.OutputWidth * pipeline.OutputHeight * 3];
                 var status = pipeline.Evaluate(capture, output, reset);
                 return (status, output, clock.Elapsed.TotalSeconds);
             });
@@ -178,7 +194,7 @@ internal sealed class DlssSeam : IDisposable
                 }
                 else
                 {
-                    _stage.UploadResult(output);
+                    _stage.UploadResult(output, _pipeline!.OutputWidth, _pipeline!.OutputHeight);
                     _processed++;
                     _state = State.Presenting;
                     Console.WriteLine(
@@ -218,7 +234,7 @@ internal sealed class DlssSeam : IDisposable
         {
             overlay.DrawHud(frameBufferWidth, frameBufferHeight,
                 $"DLSS: processing {DlssStage.LowWidth}x{DlssStage.LowHeight} frame {_processed + 1} "
-                + $"({_evaluateClock.Elapsed.TotalSeconds:F1} s so far) - seconds per frame, not real-time",
+                + $"({_evaluateClock.Elapsed.TotalSeconds:F1} s so far) - frame-by-frame, not real-time",
                 17f, new Vector4(0.95f, 0.85f, 0.55f, 0.95f));
         }
         else if (_state == State.Presenting)
@@ -317,7 +333,14 @@ internal sealed class DlssSeam : IDisposable
             state: {_state}{(_failure is null ? "" : $" ({_failure})")}
             evidence: live.png (live view), processing.png (in-flight, latency visible),
                       processed.png (presented result, label in-band)
-            synthetic weights - the transformation is arbitrary; no image-quality or vendor-parity claim
+            {(_pipeline?.DemoScale > 0
+                ? "not DLSS5 - demonstration transform with real weights (Lanczos3, " +
+                  $"x{_pipeline.DemoScale} upscale; quality measured in dlss5-linux's " +
+                  "vr/tests/native-demo-upscale-test.cpp: PSNR/SSIM vs a bilinear baseline)"
+                : "synthetic weights - the transformation is arbitrary; no image-quality or vendor-parity claim")}
+            NOT DLSS5 in any case: this seam proves the pipeline end to end,
+            never vendor parity. Frame-by-frame processing with visible latency,
+            not real-time.
             """;
         File.WriteAllText(Path.Combine(demoDir, "report.txt"), report);
         Console.WriteLine(report);
@@ -330,14 +353,13 @@ internal sealed class DlssSeam : IDisposable
         try
         {
             Screenshot.SavePng(_gl, path, width, height);
-            return;
+            Console.WriteLine($"  dlss demo: captured {width}x{height} -> {path}");
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"error: screenshot '{path}' failed: {ex.Message}");
             Environment.ExitCode = 3;
         }
-        Console.WriteLine($"  dlss demo: captured {width}x{height} -> {path}");
     }
 
     public void Dispose()

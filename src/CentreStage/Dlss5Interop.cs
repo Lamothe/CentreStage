@@ -3,12 +3,13 @@
 //
 // P/Invoke over the dlss5-linux native host boundary (vr/native-host.h).
 // The ABI is the tested C surface: create/evaluate/destroy over RGB frames,
-// the frames-since-reset counter, the arena report and the in-band label
-// ("synthetic weights — arbitrary transform") that a host MUST display
-// alongside any presented output. The evaluator is CPU-only and costs
-// seconds per frame at this boundary's geometry — callers present it as
-// on-demand frame-by-frame processing with visible latency, never as
-// real-time upscaling.
+// the frames-since-reset counter, the arena report and the mode label that
+// a host MUST display alongside any presented output ("not DLSS5 -
+// demonstration transform with real weights" in the demonstration mode;
+// "synthetic weights — arbitrary transform" otherwise). The demonstration
+// transform costs milliseconds at this boundary's geometry; the synthetic
+// evaluator costs seconds per frame. Both are on-demand frame-by-frame
+// processing with visible latency, never real-time upscaling.
 using System.Reflection;
 using System.Runtime.InteropServices;
 
@@ -73,6 +74,12 @@ internal static partial class Dlss5Native
     [LibraryImport(Lib, EntryPoint = "dlss5_nr_create")]
     internal static partial Dlss5Status Create(int width, int height, int threads, out IntPtr handle);
 
+    [LibraryImport(Lib, EntryPoint = "dlss5_nr_set_demo_transform")]
+    internal static partial Dlss5Status SetDemoTransform(IntPtr handle, int scale);
+
+    [LibraryImport(Lib, EntryPoint = "dlss5_nr_label_for")]
+    internal static partial IntPtr LabelFor(IntPtr handle);
+
     [LibraryImport(Lib, EntryPoint = "dlss5_nr_evaluate")]
     internal static partial Dlss5Status Evaluate(IntPtr handle, byte[] rgb, int rowStride,
         byte[] outRgb, int outStride, int reset);
@@ -124,6 +131,37 @@ internal sealed class Dlss5Pipeline : IDisposable
     public static string Label =>
         Marshal.PtrToStringUTF8(Dlss5Native.Label()) ?? "synthetic weights — arbitrary transform";
 
+    /// <summary>
+    /// The label for THIS pipeline's mode. The demonstration transform's
+    /// label is mandatory on every presented frame:
+    /// "not DLSS5 - demonstration transform with real weights".
+    /// </summary>
+    public string LabelFor =>
+        Marshal.PtrToStringUTF8(Dlss5Native.LabelFor(_handle)) ?? Label;
+
+    /// <summary>The demonstration-transform upscale factor (0 = off).</summary>
+    public int DemoScale { get; private set; }
+
+    /// <summary>The presented extent (scale x the capture in demo mode).</summary>
+    public int OutputWidth => Width * Math.Max(1, DemoScale);
+    public int OutputHeight => Height * Math.Max(1, DemoScale);
+
+    /// <summary>
+    /// Enables the demonstration transform (NOT DLSS5): a real, openly
+    /// documented Lanczos3 upscaler with real weights runs behind the same
+    /// ABI so the presented result visibly improves. scale 2..4; 0 restores
+    /// the synthetic pipeline.
+    /// </summary>
+    public Dlss5Status SetDemoTransform(int scale)
+    {
+        var status = Dlss5Native.SetDemoTransform(_handle, scale);
+        if (status == Dlss5Status.Ok)
+        {
+            DemoScale = scale;
+        }
+        return status;
+    }
+
     public static string StatusName(Dlss5Status status) =>
         Marshal.PtrToStringUTF8(Dlss5Native.StatusName(status)) ?? status.ToString();
 
@@ -139,14 +177,17 @@ internal sealed class Dlss5Pipeline : IDisposable
     }
 
     /// <summary>
-    /// One frame through the temporal step: rgb (3*width per row) in,
-    /// outRgb out at the same extent. A true <paramref name="reset"/> runs
-    /// DLSSNR.Reset first (history = 0, counter = 0).
+    /// One frame: rgb (3*width per row) in; outRgb out at the same
+    /// extent, or scale x the extent in the demonstration mode (the caller
+    /// sizes it via OutputWidth/OutputHeight). A true <paramref
+    /// name="reset"/> runs DLSSNR.Reset first (a no-op in the stateless
+    /// demonstration mode).
     /// </summary>
     public Dlss5Status Evaluate(byte[] rgb, byte[] outRgb, bool reset)
     {
         ObjectDisposedException.ThrowIf(_handle == IntPtr.Zero, this);
-        return Dlss5Native.Evaluate(_handle, rgb, 3 * Width, outRgb, 3 * Width, reset ? 1 : 0);
+        var outStride = 3 * OutputWidth;
+        return Dlss5Native.Evaluate(_handle, rgb, 3 * Width, outRgb, outStride, reset ? 1 : 0);
     }
 
     public void Dispose()

@@ -484,6 +484,7 @@ internal static class Program
             }
             HookInput(window, camera, () => closeRequested = true, () => playback,
                 onDlssFrame: () => dlss?.Trigger(), onCameraInput: () => dlss?.Release(),
+                onDlssToggleAB: () => dlss?.ToggleAB(),
                 onScreenshot: () =>
                 {
                     // Captured at end of frame (see the capture subscription
@@ -746,6 +747,7 @@ internal static class Program
 
     private static void HookInput(IWindow window, OrbitCamera camera, Action requestClose,
         Func<AnimationPlayback?>? playback = null, Action? onDlssFrame = null, Action? onCameraInput = null,
+        Action? onDlssToggleAB = null,
         Action? onScreenshot = null)
     {
         var input = window.CreateInput();
@@ -792,6 +794,10 @@ internal static class Program
                 else if (key == Key.F11)
                 {
                     ToggleFullscreen();
+                }
+                else if (key == Key.F10)
+                {
+                    onDlssToggleAB?.Invoke();
                 }
                 else if (key == Key.F9)
                 {

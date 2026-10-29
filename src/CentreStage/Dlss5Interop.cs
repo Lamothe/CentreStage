@@ -77,6 +77,9 @@ internal static partial class Dlss5Native
     [LibraryImport(Lib, EntryPoint = "dlss5_nr_set_demo_transform")]
     internal static partial Dlss5Status SetDemoTransform(IntPtr handle, int scale);
 
+    [LibraryImport(Lib, EntryPoint = "dlss5_nr_set_demo_kernel")]
+    internal static partial Dlss5Status SetDemoKernel(IntPtr handle, int kernel);
+
     [LibraryImport(Lib, EntryPoint = "dlss5_nr_label_for")]
     internal static partial IntPtr LabelFor(IntPtr handle);
 
@@ -152,6 +155,13 @@ internal sealed class Dlss5Pipeline : IDisposable
     /// ABI so the presented result visibly improves. scale 2..4; 0 restores
     /// the synthetic pipeline.
     /// </summary>
+    /// <summary>The A/B kernel: 1 = Lanczos3, 2 = the bilinear baseline.</summary>
+    public Dlss5Status SetDemoKernel(int kernel)
+    {
+        ObjectDisposedException.ThrowIf(_handle == IntPtr.Zero, this);
+        return Dlss5Native.SetDemoKernel(_handle, kernel);
+    }
+
     public Dlss5Status SetDemoTransform(int scale)
     {
         var status = Dlss5Native.SetDemoTransform(_handle, scale);

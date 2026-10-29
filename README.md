@@ -59,17 +59,26 @@ Re-run the script after pulling changes; it is idempotent.
 An optional seam wires the tested C host ABI of the dlss5-linux project
 (`vr/native-host.h`, built into `libdlss5_nr_host.so` by
 `linux/build-native-host.sh`; `DLSS5_LINUX=/path/to/dlss5-linux` selects the
-checkout): the current view is rendered into a 64x72 low-resolution
-framebuffer, read back, processed on a worker thread, and the returned
+checkout): the current view is rendered into a low-resolution framebuffer (the
+seam's capture geometry), read back, processed on a worker thread, and the returned
 frame is presented fullscreen with the in-band label in the status text.
 
 By default the seam runs the **demonstration transform** (NOT DLSS5): a
 real openly documented Lanczos3 upscaler with real weights (dlss5-linux's
 `vr/NATIVE-DEMO-UPSCALE.md`) behind the identical ABI/capture/present
-path. Geometry: the 64x72 capture upscales x4 to a 256x288 presented
-frame. Measured quality (the harness's generated source vs a bilinear
-baseline): PSNR 14.79 vs 14.74 dB, SSIM 0.793 vs 0.776. The label the
-seam displays with every presented frame is exactly:
+path. Geometry (the seam's knob): a **half-window capture upscaled x2**
+(640x400 -> 1280x800 at the default window) - the geometry that looks
+sharp; the earlier 64x72 x4 capture is imperceptible (Michael's F9
+verdict) and stays available as the "extreme" stress case
+(`CENTRESTAGE_DLSS_EXTREME=1`; `CENTRESTAGE_DLSS_SYNTHETIC=1` selects
+the synthetic pipeline at 64x72). Measured quality at the x2 ratio (the
+harness's generated source vs a bilinear baseline): PSNR 20.49 vs
+19.62 dB, SSIM 0.9138 vs 0.9067 - the SSIM margin is small and stated
+plainly; the case is the visible A/B, not the number. **F10 swaps the
+presented result between the Lanczos3 transform and the bilinear
+baseline at the SAME capture geometry** (evidence:
+`.evidence/dlss-demo-ab/{processed,baseline}.png` differ in 1.2% of RGB bytes). The label the seam displays with every presented frame is
+exactly:
 
     not DLSS5 - demonstration transform with real weights
 
@@ -84,8 +93,9 @@ sequenced, with `dlss5_nr_label()` = "synthetic weights — arbitrary
 transform" — the synthetic weights really do make that transform
 arbitrary (it rails some channels). It costs seconds per frame (measured
 **8.7 s** worker wall-clock at the 64x72 demo geometry on an idle RTX
-4070 Ti SUPER; ~10.8 s capture-to-presented). The boundary refuses frames
-whose padded extent exceeds its 320x320 working floor. Note: on a session
+4070 Ti SUPER; ~10.8 s capture-to-presented). The synthetic path refuses frames
+whose padded extent exceeds its 320x320 floor (demo-only handles serve
+the demonstration transform up to 2048x2048). Note: on a session
 that has gone idle-blanked (GNOME's idle-delay), the compositor throttles
 the window's render cadence — the screenshots and the evaluator still
 work, but the app itself paints rarely until the session wakes.
@@ -100,7 +110,8 @@ the seam is idle.
 
 `--dlss-demo outdir` drives the same path unattended: it screenshots the
 live view (`live.png`), the in-flight frame (`processing.png`) and the
-presented result (`processed.png`, label in-band), writes `report.txt`
+presented result (`processed.png` = Lanczos3 and `baseline.png` = bilinear, one frame
+apart so the swap is actually presented), writes `report.txt`
 (label, geometry, measured latency, counter, arena high-water) and closes.
 Env: `CENTRESTAGE_DLSS_LIB` (explicit library path), `CENTRESTAGE_WINDOW_POS`
 ("x,y" window placement — honoured on X11/XWayland; the unattended runs

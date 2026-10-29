@@ -16,15 +16,17 @@ namespace CentreStage;
 
 internal sealed class DlssStage : IDisposable
 {
-    // The demo geometry of the native boundary (64x72 pads to its 320x320
-    // working floor; larger frames are refused by dlss5_nr_create).
+    // The synthetic path's geometry (64x72 pads to the network's 320x320
+    // floor). The demonstration mode captures at the seam's chosen size.
     public const int LowWidth = 64;
     public const int LowHeight = 72;
 
     private readonly GL _gl;
     private readonly uint _fbo;
-    private readonly uint _fboTexture;
-    private readonly uint _depthBuffer;
+    private uint _fboTexture;
+    private uint _depthBuffer;
+    private int _captureW = LowWidth;
+    private int _captureH = LowHeight;
     private readonly uint _presentProgram;
     private readonly int _presentTexLocation;
     private readonly uint _presentVao;
@@ -76,11 +78,35 @@ internal sealed class DlssStage : IDisposable
         gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)GLEnum.ClampToEdge);
     }
 
-    /// <summary>Binds the low-resolution framebuffer for the scene draw.</summary>
+    /// <summary>
+    /// The capture size follows the seam's mode (the demo default is a
+    /// half-window capture; the extreme/synthetic modes use the 64x72
+    /// geometry). Recreates the capture framebuffer on change.
+    /// </summary>
+    public unsafe void EnsureCaptureSize(int width, int height)
+    {
+        if (width == _captureW && height == _captureH)
+        {
+            return;
+        }
+        _captureW = width;
+        _captureH = height;
+        _gl.BindTexture(TextureTarget.Texture2D, _fboTexture);
+        _gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgba8, (uint)width, (uint)height,
+            0, PixelFormat.Rgba, PixelType.UnsignedByte, null);
+        _gl.BindRenderbuffer(RenderbufferTarget.Renderbuffer, _depthBuffer);
+        _gl.RenderbufferStorage(RenderbufferTarget.Renderbuffer, InternalFormat.DepthComponent24,
+            (uint)width, (uint)height);
+    }
+
+    public int CaptureWidth => _captureW;
+    public int CaptureHeight => _captureH;
+
+    /// <summary>Binds the capture framebuffer for the scene draw.</summary>
     public void BeginCapture()
     {
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _fbo);
-        _gl.Viewport(0, 0, LowWidth, LowHeight);
+        _gl.Viewport(0, 0, (uint)_captureW, (uint)_captureH);
     }
 
     /// <summary>
@@ -91,10 +117,10 @@ internal sealed class DlssStage : IDisposable
     /// </summary>
     public unsafe byte[] EndCapture(int frameBufferWidth, int frameBufferHeight)
     {
-        var rgb = new byte[LowWidth * LowHeight * 3];
+        var rgb = new byte[_captureW * _captureH * 3];
         fixed (byte* p = rgb)
         {
-            _gl.ReadPixels(0, 0, LowWidth, LowHeight, PixelFormat.Rgb, PixelType.UnsignedByte, p);
+            _gl.ReadPixels(0, 0, (uint)_captureW, (uint)_captureH, PixelFormat.Rgb, PixelType.UnsignedByte, p);
         }
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         _gl.Viewport(0, 0, (uint)frameBufferWidth, (uint)frameBufferHeight);

@@ -38,37 +38,75 @@ internal sealed class DlssSeam : IDisposable
     private State _state = State.Idle;
     private string? _failure;
     private readonly Stopwatch _evaluateClock = new();
-    private Task<(Dlss5Status Status, byte[] Out, byte[]? Baseline, double Seconds)>? _worker;
+    private Task<(Dlss5Status Status, (string Name, byte[] Buf)[] Views, double Seconds)>? _worker;
     private double _lastSeconds;
     private double _presentationSeconds;
     private int _processed;
-    private byte[]? _pinnedPrimary;
-    private byte[]? _pinnedBaseline;
-    private int _pinnedView;  // 0 = the transform, 1 = the bilinear baseline
+    // The pinned result's named views in F10 cycle order:
+    //   model loaded: [neural, bilinear, Lanczos3]
+    //   otherwise:    [Lanczos3, bilinear]
+    private (string Name, byte[] Buf)[]? _pinnedViews;
+    private int _pinnedView;
     private bool _abMissing;
+    private byte[]? _reference;
+    private int _demoViewIndex;
     private int _captureW = DlssStage.LowWidth;
     private int _captureH = DlssStage.LowHeight;
     private int _frameBufferW;
     private int _frameBufferH;
 
     /// <summary>The view shown with the pinned result (for the HUD).</summary>
-    public string ViewName => _pinnedView == 1
-        ? "view: bilinear baseline (F10: Lanczos3)"
-        : "view: Lanczos3 demonstration (F10: bilinear)";
+    public string ViewName
+    {
+        get
+        {
+            if (_pinnedViews is null || _pinnedViews.Length == 0)
+            {
+                return "view: (none)";
+            }
+            var i = Math.Clamp(_pinnedView, 0, _pinnedViews.Length - 1);
+            var next = _pinnedViews[(i + 1) % _pinnedViews.Length].Name;
+            string Pretty(string name) => name switch
+            {
+                "neural" => "neural demonstration",
+                "bilinear" => "bilinear baseline",
+                _ => "Lanczos3 demonstration",
+            };
+            return $"view: {Pretty(_pinnedViews[i].Name)} (F10: {next})";
+        }
+    }
 
-    /// <summary>F10: swap the pinned result between the A/B pair.</summary>
+    /// <summary>The pinned views' labels (the report's honesty lines).</summary>
+    public IReadOnlyList<string> ViewLabels
+    {
+        get
+        {
+            var labels = new List<string>();
+            if (_pinnedViews is not null)
+            {
+                foreach (var v in _pinnedViews)
+                {
+                    labels.Add(v.Name == "neural"
+                        ? "neural: " + Dlss5Pipeline.LoadedModelLabel
+                        : $"{v.Name}: not DLSS5 - classical demonstration " +
+                          $"scaler ({(v.Name == "bilinear" ? "bilinear baseline" : "Lanczos3")})");
+                }
+            }
+            return labels;
+        }
+    }
+
+    /// <summary>F10: cycle the pinned result through the views.</summary>
     public void ToggleAB()
     {
-        if (_state != State.Presenting || _pinnedBaseline is null || _pinnedPrimary is null)
+        if (_state != State.Presenting || _pinnedViews is null || _pinnedViews.Length < 2)
         {
             Console.WriteLine("dlss: F10 ignored (no A/B pair)");
             return;
         }
-        _pinnedView = 1 - _pinnedView;
-        var (buf, w, h) = _pinnedView == 1
-            ? (_pinnedBaseline, _pipeline!.OutputWidth, _pipeline!.OutputHeight)
-            : (_pinnedPrimary, _pipeline!.OutputWidth, _pipeline!.OutputHeight);
-        _stage.UploadResult(buf, w, h);
+        _pinnedView = (_pinnedView + 1) % _pinnedViews.Length;
+        _stage.UploadResult(_pinnedViews[_pinnedView].Buf, _pipeline!.OutputWidth,
+            _pipeline!.OutputHeight);
         Console.WriteLine($"dlss: F10 -> {ViewName}");
     }
     private bool _resetNext = true;
@@ -181,6 +219,7 @@ internal sealed class DlssSeam : IDisposable
                     _captureH = DlssStage.LowHeight;
                     _pipeline = new Dlss5Pipeline(_captureW, _captureH, threads: 8);
                     _pipeline.SetDemoTransform(2);
+                    _pipeline.SetDemoKernel(_pipeline.PrimaryKernel);
                 }
                 else
                 {
@@ -193,6 +232,7 @@ internal sealed class DlssSeam : IDisposable
                     _captureH = Math.Max(2, (int)(_frameBufferH * scale) & ~1);
                     _pipeline = new Dlss5Pipeline(_captureW, _captureH, threads: 8);
                     var demoStatus = _pipeline.SetDemoTransform(2);
+                    _pipeline.SetDemoKernel(_pipeline.PrimaryKernel);
                     if (demoStatus != Dlss5Status.Ok)
                     {
                         Console.Error.WriteLine(
@@ -233,6 +273,17 @@ internal sealed class DlssSeam : IDisposable
             _stage.BeginCapture();
             drawScene();
             var capture = _stage.EndCapture(frameBufferWidth, frameBufferHeight);
+            if (_pipeline!.DemoScale > 0)
+            {
+                // The ground truth for the quality measurement: the same
+                // view rendered at the PRESENTED size (the upscale's
+                // honest reference).
+                _stage.EnsureCaptureSize(_pipeline.OutputWidth, _pipeline.OutputHeight);
+                _stage.BeginCapture();
+                drawScene();
+                _reference = _stage.EndCapture(_pipeline.OutputWidth, _pipeline.OutputHeight);
+                _stage.EnsureCaptureSize(_captureW, _captureH);
+            }
             var reset = _resetNext;
             _resetNext = false;
             _evaluateClock.Restart();
@@ -248,31 +299,60 @@ internal sealed class DlssSeam : IDisposable
                         "fault injection: CENTRESTAGE_DLSS_FAULT=throw-once");
                 }
                 var clock = Stopwatch.StartNew();
-                var output = new byte[pipeline.OutputWidth * pipeline.OutputHeight * 3];
-                var status = pipeline.Evaluate(capture, output, reset);
-                // The A/B: the SAME capture through the bilinear baseline
-                // kernel (the honest comparison floor at the same geometry).
-                byte[]? baseline = null;
+                _abMissing = false;
+                var bytes = pipeline.OutputWidth * pipeline.OutputHeight * 3;
+                var primary = new byte[bytes];
+                var status = pipeline.Evaluate(capture, primary, reset);
+                // The A/B views: the SAME capture through the alternate
+                // kernels (the honest comparison at the same geometry).
+                // With the real weights loaded the primary is the neural
+                // demonstration and the alternates are the two classical
+                // scalers; without it the primary is Lanczos3.
+                string NameFor(int kernel) => kernel == 3
+                    ? "neural"
+                    : kernel == 2 ? "bilinear" : "Lanczos3";
+                var views = new List<(string Name, byte[] Buf)>
+                {
+                    (NameFor(_pipeline?.PrimaryKernel ?? 1), primary),
+                };
                 if (status == Dlss5Status.Ok && pipeline.DemoScale > 0)
                 {
-                    // The kernel must return to Lanczos3 even if the
-                    // baseline pass faults (otherwise the next "Lanczos3"
-                    // frame would silently be bilinear).
+                    // Every alternate pass must restore the primary kernel
+                    // even on failure (otherwise the next "neural" frame
+                    // would silently be a classical scaler).
                     try
                     {
-                        if (pipeline.SetDemoKernel(2) == Dlss5Status.Ok)
+                        foreach (var kernel in new[] { 2, 1 })
                         {
-                            baseline = new byte[output.Length];
-                            var bStatus = pipeline.Evaluate(capture, baseline, reset: false);
-                            if (bStatus != Dlss5Status.Ok)
+                            if (kernel == (_pipeline?.PrimaryKernel ?? 1))
                             {
-                                baseline = null;
+                                continue;
+                            }
+                            if (pipeline.SetDemoKernel(kernel) != Dlss5Status.Ok)
+                            {
+                                _abMissing = true;
+                                continue;
+                            }
+                            var alt = new byte[bytes];
+                            var altStatus = pipeline.Evaluate(capture, alt, reset: false);
+                            if (altStatus == Dlss5Status.Ok)
+                            {
+                                views.Add((NameFor(kernel), alt));
+                            }
+                            else
+                            {
+                                // A failed alternate: the fact is recorded
+                                // and the view is dropped - never a
+                                // stand-in masquerading as a comparison.
+                                _abMissing = true;
+                                Console.Error.WriteLine(
+                                    $"error: alternate view {NameFor(kernel)} failed: {altStatus}");
                             }
                         }
                     }
                     finally
                     {
-                        var restore = pipeline.SetDemoKernel(1);
+                        var restore = pipeline.SetDemoKernel(_pipeline!.PrimaryKernel);
                         if (restore != Dlss5Status.Ok)
                         {
                             Console.Error.WriteLine(
@@ -280,7 +360,7 @@ internal sealed class DlssSeam : IDisposable
                         }
                     }
                 }
-                return (status, output, baseline, clock.Elapsed.TotalSeconds);
+                return (status, views.ToArray(), clock.Elapsed.TotalSeconds);
             });
             _state = State.Processing;
         }
@@ -289,7 +369,7 @@ internal sealed class DlssSeam : IDisposable
         {
             try
             {
-                var (status, output, baseline, evaluateSeconds) = _worker.GetAwaiter().GetResult();
+                var (status, views, evaluateSeconds) = _worker.GetAwaiter().GetResult();
                 _evaluateClock.Stop();
                 _lastSeconds = evaluateSeconds;
                 _presentationSeconds = _evaluateClock.Elapsed.TotalSeconds;
@@ -302,9 +382,8 @@ internal sealed class DlssSeam : IDisposable
                 }
                 else
                 {
-                    _stage.UploadResult(output, _pipeline!.OutputWidth, _pipeline!.OutputHeight);
-                    _pinnedPrimary = output;
-                    _pinnedBaseline = baseline;
+                    _stage.UploadResult(views[0].Buf, _pipeline!.OutputWidth, _pipeline!.OutputHeight);
+                    _pinnedViews = views;
                     _pinnedView = 0;
                     _processed++;
                     _state = State.Presenting;
@@ -412,20 +491,28 @@ internal sealed class DlssSeam : IDisposable
             case 3:
                 if (_state == State.Presenting)
                 {
-                    SavePng(Path.Combine(_demoDir, "processed.png"), frameBufferWidth,
-                        frameBufferHeight);
-                    if (_pinnedBaseline is null)
+                    string PrimaryFile(string name) => name switch
                     {
-                        // No A/B pair (the baseline pass failed): record
-                        // the fact rather than faking a duplicate.
+                        "neural" => "processed.png",
+                        "bilinear" => "baseline.png",
+                        _ => "lanczos3.png",
+                    };
+                    SavePng(Path.Combine(_demoDir, PrimaryFile(
+                            _pinnedViews![0].Name)), frameBufferWidth,
+                        frameBufferHeight);
+                    if (_pinnedViews is null || _pinnedViews.Length < 2)
+                    {
+                        // No A/B pair: record the fact rather than faking
+                        // a duplicate.
                         Console.WriteLine(
-                            "dlss demo: no A/B pair (the baseline pass failed)");
+                            "dlss demo: no A/B pair (the alternate pass failed)");
                         _abMissing = true;
                         WriteReport(_demoDir, frameBufferWidth, frameBufferHeight);
                         _demoStage = 4;
                         requestClose();
                         break;
                     }
+                    _demoViewIndex = 1;
                     ToggleAB();
                     _demoStage = 5;
                 }
@@ -439,12 +526,25 @@ internal sealed class DlssSeam : IDisposable
             case 5:
                 // One frame after the A/B swap: the swapped texture has
                 // been presented (a screenshot right after the upload
-                // would capture the PREVIOUS view - the two must differ).
+                // would capture the PREVIOUS view - the files must differ).
                 if (_state == State.Presenting)
                 {
-                    SavePng(Path.Combine(_demoDir, "baseline.png"), frameBufferWidth,
+                    string FileFor(string name) => name switch
+                    {
+                        "neural" => "processed.png",
+                        "bilinear" => "baseline.png",
+                        _ => "lanczos3.png",
+                    };
+                    var viewFile = FileFor(_pinnedViews![
+                        Math.Min(_demoViewIndex, _pinnedViews.Length - 1)].Name);
+                    SavePng(Path.Combine(_demoDir, viewFile), frameBufferWidth,
                         frameBufferHeight);
-                    ToggleAB();
+                    _demoViewIndex++;
+                    if (_demoViewIndex < _pinnedViews.Length)
+                    {
+                        ToggleAB();
+                        break;
+                    }
                     WriteReport(_demoDir, frameBufferWidth, frameBufferHeight);
                     _demoStage = 4;
                     requestClose();
@@ -461,34 +561,201 @@ internal sealed class DlssSeam : IDisposable
 
     private void WriteReport(string demoDir, int width, int height)
     {
+        // The honest per-view measurement: each presented view compared
+        // against the ground truth (the same view rendered at the
+        // presented size). PSNR/SSIM on the RGB bytes.
+        var quality = new System.Text.StringBuilder();
+        if (_reference is not null && _pinnedViews is not null)
+        {
+            var names = _pinnedViews.Select(v => v.Name == "neural"
+                    ? $"neural ({Dlss5Pipeline.LoadedModelName})"
+                    : v.Name == "bilinear" ? "bilinear baseline" : "Lanczos3")
+                .ToArray();
+            var w = _pipeline!.OutputWidth;
+            var h = _pipeline.OutputHeight;
+            // The pre-declared centre crop (the central 50%): the region
+            // where the subject carries detail, reported separately from
+            // the full frame so the dilution by smooth background is
+            // visible in the numbers.
+            var cx0 = w / 4;
+            var cy0 = h / 4;
+            var cx1 = w - w / 4;
+            var cy1 = h - h / 4;
+            var refDetail = DetailEnergy(_reference, w, h, cx0, cy0, cx1, cy1);
+            quality.AppendLine(
+                $"  ground-truth detail energy (centre crop): {refDetail:F1}");
+            for (var i = 0; i < _pinnedViews.Length && i < names.Length; ++i)
+            {
+                var (psnr, ssim) = QualityVs(_reference, _pinnedViews[i].Buf,
+                    w, h);
+                var (cpsnr, cssim) = QualityVs(_reference, _pinnedViews[i].Buf,
+                    w, h, cx0, cy0, cx1, cy1);
+                var detail = DetailEnergy(_pinnedViews[i].Buf, w, h, cx0, cy0,
+                    cx1, cy1);
+                quality.AppendLine(
+                    $"  view {names[i]}: full frame PSNR {psnr:F2} dB, " +
+                    $"SSIM {ssim:F4}; centre crop PSNR {cpsnr:F2} dB, " +
+                    $"SSIM {cssim:F4}; detail energy {detail:F1}");
+            }
+            quality.AppendLine(
+                "  ground truth: the scene rendered at the presented size " +
+                "(real content, the demo's actual capture). Detail energy " +
+                "= mean squared Laplacian of the luminance x1000 in the " +
+                "centre crop (how much fine structure each view carries).");
+        }
+        else
+        {
+            quality.AppendLine("  (no ground-truth capture available)");
+        }
+        var labels = ViewLabels;
+        var labelBlock = new System.Text.StringBuilder();
+        foreach (var l in labels)
+        {
+            labelBlock.AppendLine($"  {l}");
+        }
         var report = $"""
             Centre Stage x dlss5-linux native host - unattended demo run
             date (local): {DateTime.Now:dd/MM/yyyy HH:mm:ss}
             window framebuffer: {width}x{height}
             capture geometry: {_captureW}x{_captureH} -> {_pipeline?.OutputWidth}x{_pipeline?.OutputHeight} presented
-            A/B: F10 swaps the Lanczos3 demonstration and the bilinear baseline at the SAME capture
-            A/B pair: {(_abMissing ? "MISSING (the baseline pass failed)" : "baseline.png (bilinear view)") }
+            views (F10 cycles at the SAME capture): {string.Join(", ", labels)}
+            A/B pair: {((_pipeline?.DemoScale ?? 0) == 0 ? "not attempted (synthetic mode)" : _abMissing ? "MISSING (an alternate pass failed)" : $"{_pinnedViews?.Length ?? 0} view(s) captured")}
             in-band label: {Label}
             frames processed: {_processed}
             last evaluate: {_lastSeconds:F2} s (worker wall clock around the native call)
             capture-to-presented: {_presentationSeconds:F2} s (includes the render loop's
               cadence; the loop is throttled while the session is idle-blanked)
             frames since reset: {_pipeline?.Counter ?? 0}
-            arena high-water: {_pipeline?.ArenaHighWaterFloats ?? 0} floats
             state: {_state}{(_failure is null ? "" : $" ({_failure})")}
+            quality vs ground truth (the real capture):
+            {quality.ToString().TrimEnd()}
+            per-view labels:
+            {labelBlock.ToString().TrimEnd()}
             evidence: live.png (live view), processing.png (in-flight, latency visible),
-                      processed.png (presented result, label in-band)
-            {(_pipeline?.DemoScale > 0
-                ? "not DLSS5 - demonstration transform with real weights (Lanczos3, " +
-                  $"x{_pipeline.DemoScale} upscale; quality measured in dlss5-linux's " +
-                  "vr/tests/native-demo-upscale-test.cpp: PSNR/SSIM vs a bilinear baseline)"
-                : "synthetic weights - the transformation is arbitrary; no image-quality or vendor-parity claim")}
+                      one file per view: {string.Join(" + ", _pinnedViews?.Select(v => v.Name == "neural" ? "processed.png" : v.Name == "bilinear" ? "baseline.png" : "lanczos3.png") ?? Array.Empty<string>())}
             NOT DLSS5 in any case: this seam proves the pipeline end to end,
             never vendor parity. Frame-by-frame processing with visible latency,
-            not real-time.
+            not real-time (the neural view is seconds per frame on CPU - see
+            the evaluate line above).
             """;
         File.WriteAllText(Path.Combine(demoDir, "report.txt"), report);
         Console.WriteLine(report);
+    }
+
+    /// <summary>PSNR and SSIM of an 8-bit RGB buffer against the ground truth.</summary>
+    private static (double Psnr, double Ssim) QualityVs(byte[] reference,
+        byte[] view, int w, int h)
+    {
+        return QualityVs(reference, view, w, h, 0, 0, w, h);
+    }
+
+    /// <summary>The mean squared Laplacian of the luminance (x1000).</summary>
+    private static double DetailEnergy(byte[] img, int w, int h, int x0,
+        int y0, int x1, int y1)
+    {
+        double sum = 0;
+        long n = 0;
+        for (var y = Math.Max(1, y0); y < Math.Min(h - 1, y1); ++y)
+        {
+            for (var x = Math.Max(1, x0); x < Math.Min(w - 1, x1); ++x)
+            {
+                var idx = (y * w + x) * 3;
+                var idxl = (y * w + x - 1) * 3;
+                var idxr = (y * w + x + 1) * 3;
+                var idxu = ((y - 1) * w + x) * 3;
+                var idxd = ((y + 1) * w + x) * 3;
+                // The luminance (the text says luminance; the metric
+                // computes the luminance).
+                static double Lum(byte[] im, int i) =>
+                    0.299 * im[i] + 0.587 * im[i + 1] + 0.114 * im[i + 2];
+                var lap = Lum(img, idxl) + Lum(img, idxr) + Lum(img, idxu)
+                          + Lum(img, idxd) - 4.0 * Lum(img, idx);
+                sum += lap * lap;
+                n++;
+            }
+        }
+        return n > 0 ? sum / n * 1000.0 : 0;
+    }
+
+    /// <summary>PSNR and SSIM over a crop of the frame.</summary>
+    private static (double Psnr, double Ssim) QualityVs(byte[] reference,
+        byte[] view, int w, int h, int x0, int y0, int x1, int y1)
+    {
+        if (reference.Length != view.Length || reference.Length == 0)
+        {
+            return (0, 0);
+        }
+        double mse = 0;
+        long samples = 0;
+        for (var y = y0; y < y1; ++y)
+        {
+            for (var x = x0; x < x1; ++x)
+            {
+                var idx = (y * w + x) * 3;
+                for (var c = 0; c < 3; ++c)
+                {
+                    var d = reference[idx + c] - view[idx + c];
+                    mse += d * d;
+                    samples++;
+                }
+            }
+        }
+        mse = samples > 0 ? mse / samples : 0;
+        var psnr = mse <= 0 ? 99.0 : 10.0 * Math.Log10(255.0 * 255.0 / mse);
+        // A single-window SSIM on the luminance (8x8 blocks, the standard
+        // constants) - honest and documented as such.
+        double ssimSum = 0;
+        var blocks = 0;
+        const int n = 8;
+        if ((long)w * h * 3 != reference.Length)
+        {
+            return (psnr, 0);
+        }
+        for (var by = Math.Max(y0, (y0 / n) * n); by + n <= y1; by += n)
+        {
+            for (var bx = Math.Max(x0, (x0 / n) * n); bx + n <= x1; bx += n)
+            {
+                double m1 = 0, m2 = 0;
+                for (var y = 0; y < n; ++y)
+                {
+                    for (var x = 0; x < n; ++x)
+                    {
+                        var idx = ((by + y) * w + (bx + x)) * 3;
+                        var l1 = 0.299 * reference[idx] + 0.587 * reference[idx + 1]
+                                 + 0.114 * reference[idx + 2];
+                        var l2 = 0.299 * view[idx] + 0.587 * view[idx + 1]
+                                 + 0.114 * view[idx + 2];
+                        m1 += l1;
+                        m2 += l2;
+                    }
+                }
+                m1 /= n * n;
+                m2 /= n * n;
+                double v1 = 0, v2 = 0, cov = 0;
+                for (var y = 0; y < n; ++y)
+                {
+                    for (var x = 0; x < n; ++x)
+                    {
+                        var idx = ((by + y) * w + (bx + x)) * 3;
+                        var l1 = 0.299 * reference[idx] + 0.587 * reference[idx + 1]
+                                 + 0.114 * reference[idx + 2];
+                        var l2 = 0.299 * view[idx] + 0.587 * view[idx + 1]
+                                 + 0.114 * view[idx + 2];
+                        v1 += (l1 - m1) * (l1 - m1);
+                        v2 += (l2 - m2) * (l2 - m2);
+                        cov += (l1 - m1) * (l2 - m2);
+                    }
+                }
+                v1 /= n * n - 1;
+                v2 /= n * n - 1;
+                cov /= n * n - 1;
+                const double c1 = 6.5025, c2 = 58.5225;
+                ssimSum += ((2 * m1 * m2 + c1) * (2 * cov + c2))
+                           / ((m1 * m1 + m2 * m2 + c1) * (v1 + v2 + c2));
+                blocks++;
+            }
+        }
+        return (psnr, blocks > 0 ? ssimSum / blocks : 0);
     }
 
     private void SavePng(string path, int width, int height)

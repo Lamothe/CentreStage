@@ -5,9 +5,10 @@
 // The ABI is the tested C surface: create/evaluate/destroy over RGB frames,
 // the frames-since-reset counter, the arena report and the mode label that
 // a host MUST display alongside any presented output ("not DLSS5 -
-// demonstration transform with real weights" in the demonstration mode;
-// "synthetic weights — arbitrary transform" otherwise). The demonstration
-// transform costs milliseconds at this boundary's geometry; the synthetic
+// demonstration transform with real weights (<model>, <license>)" for the
+// neural path; "not DLSS5 - classical demonstration scaler (Lanczos3 /
+// bilinear baseline)" for the fixed kernels; "synthetic weights - arbitrary
+// transform" otherwise). The demonstration
 // evaluator costs seconds per frame. Both are on-demand frame-by-frame
 // processing with visible latency, never real-time upscaling.
 using System.Reflection;
@@ -80,6 +81,16 @@ internal static partial class Dlss5Native
     [LibraryImport(Lib, EntryPoint = "dlss5_nr_set_demo_kernel")]
     internal static partial Dlss5Status SetDemoKernel(IntPtr handle, int kernel);
 
+    [LibraryImport(Lib, EntryPoint = "dlss5_nr_demo_model_load",
+        StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial Dlss5Status DemoModelLoad(string path);
+
+    [LibraryImport(Lib, EntryPoint = "dlss5_nr_demo_model_loaded")]
+    internal static partial int DemoModelLoaded();
+
+    [LibraryImport(Lib, EntryPoint = "dlss5_nr_demo_model_label")]
+    internal static partial IntPtr DemoModelLabel();
+
     [LibraryImport(Lib, EntryPoint = "dlss5_nr_label_for")]
     internal static partial IntPtr LabelFor(IntPtr handle);
 
@@ -135,9 +146,11 @@ internal sealed class Dlss5Pipeline : IDisposable
         Marshal.PtrToStringUTF8(Dlss5Native.Label()) ?? "synthetic weights — arbitrary transform";
 
     /// <summary>
-    /// The label for THIS pipeline's mode. The demonstration transform's
-    /// label is mandatory on every presented frame:
-    /// "not DLSS5 - demonstration transform with real weights".
+    /// The label for THIS pipeline's mode, mandatory on every presented
+    /// frame. The demonstration path's label names the actual transform
+    /// ("demonstration transform with real weights (<model>)" for the
+    /// neural path; "classical demonstration scaler (Lanczos3 / bilinear
+    /// baseline)" for the fixed kernels).
     /// </summary>
     public string LabelFor =>
         Marshal.PtrToStringUTF8(Dlss5Native.LabelFor(_handle)) ?? Label;
@@ -150,12 +163,14 @@ internal sealed class Dlss5Pipeline : IDisposable
     public int OutputHeight => Height * Math.Max(1, DemoScale);
 
     /// <summary>
-    /// Enables the demonstration transform (NOT DLSS5): a real, openly
-    /// documented Lanczos3 upscaler with real weights runs behind the same
-    /// ABI so the presented result visibly improves. scale 2..4; 0 restores
+    /// Enables the demonstration transform (NOT DLSS5): a real upscaler
+    /// runs behind the same ABI (a learned model with real open weights
+    /// when loaded, or the classical Lanczos3 scaler) so the presented
+    /// result visibly differs at the demo geometry. scale 2..4; 0 restores
     /// the synthetic pipeline.
     /// </summary>
-    /// <summary>The A/B kernel: 1 = Lanczos3, 2 = the bilinear baseline.</summary>
+    /// <summary>The A/B kernel: 1 = Lanczos3, 2 = the bilinear baseline,
+    /// 3 = the neural demonstration (requires loaded real weights).</summary>
     public Dlss5Status SetDemoKernel(int kernel)
     {
         ObjectDisposedException.ThrowIf(_handle == IntPtr.Zero, this);
@@ -171,6 +186,38 @@ internal sealed class Dlss5Pipeline : IDisposable
         }
         return status;
     }
+
+    /// <summary>
+    /// Load the demonstration model (real open weights: EDSR-base x2 or
+    /// Real-ESRGAN x2, both openly licensed). Process-global; loaded once
+    /// at startup. NOT DLSS5 - a demonstration.
+    /// </summary>
+    public static Dlss5Status LoadDemoModel(string path)
+    {
+        var status = Dlss5Native.DemoModelLoad(path);
+        if (status == Dlss5Status.Ok)
+        {
+            LoadedModelName = System.IO.Path.GetFileName(path);
+        }
+        return status;
+    }
+
+    public static bool HasModel => Dlss5Native.DemoModelLoaded() != 0;
+
+    /// <summary>The loaded model's honest label ("not DLSS5 - ...").</summary>
+    public static string LoadedModelLabel =>
+        Marshal.PtrToStringUTF8(Dlss5Native.DemoModelLabel())
+        ?? "not DLSS5 - demonstration transform (no model loaded)";
+
+    /// <summary>The loaded model's file name (for the report).</summary>
+    public static string? LoadedModelName { get; private set; }
+
+    /// <summary>
+    /// The pipeline's primary demo kernel: 3 (the neural demonstration)
+    /// only at the model's x2 ratio with the real weights loaded; the
+    /// classical Lanczos3 scaler otherwise (the x4 extreme mode).
+    /// </summary>
+    public int PrimaryKernel => DemoScale == 2 && HasModel ? 3 : 1;
 
     public static string StatusName(Dlss5Status status) =>
         Marshal.PtrToStringUTF8(Dlss5Native.StatusName(status)) ?? status.ToString();

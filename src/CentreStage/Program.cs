@@ -158,7 +158,8 @@ internal static class Program
         Console.WriteLine("       CentreStage <model.glb> --dlss-demo outdir   (unattended: live + processed evidence)");
         Console.WriteLine("viewer: F9 processes one frame through the dlss5-linux native host (frame-by-frame,");
         Console.WriteLine("        not real-time; demonstration transform - \"not DLSS5 - demonstration transform");
-        Console.WriteLine("        with real weights\").");
+        Console.WriteLine("        with real weights (neural path)\" or \"not DLSS5 - classical demonstration");
+        Console.WriteLine("        scaler\" - the in-band label names the actual path).");
     }
 
     /// <summary>
@@ -470,6 +471,57 @@ internal static class Program
             // there is nothing to evidence without it, so fail fast.
             try
             {
+                // The demonstration model (real open weights: EDSR-base
+                // x2, Apache-2.0, or Real-ESRGAN x2, BSD-3): loaded once
+                // at startup so the neural view is available to the seam.
+                // NOT DLSS5 - a demonstration.
+                var modelPath = Environment.GetEnvironmentVariable("CENTRESTAGE_DLSS_MODEL");
+                if (string.IsNullOrEmpty(modelPath))
+                {
+                    // The default is the classical SR model (EDSR-base
+                    // x2); Real-ESRGAN (blind restoration) is the
+                    // fallback. Neither is assumed to win: the measured
+                    // numbers are in vr/NATIVE-DEMO-UPSCALE.md.
+                    var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                    var dirs = new[]
+                    {
+                        Path.Combine(home, ".local/share/dlss5-demo"),
+                        Path.Combine(home, "Projects/dlss5-linux/.tools/models"),
+                    };
+                    string? found = null;
+                    foreach (var name in new[]
+                             {
+                                 "edsr-base-x2.pt", "RealESRGAN_x2plus.safetensors",
+                             })
+                    {
+                        foreach (var dir in dirs)
+                        {
+                            var candidate = Path.Combine(dir, name);
+                            if (File.Exists(candidate))
+                            {
+                                found = candidate;
+                                break;
+                            }
+                        }
+                        if (found is not null)
+                        {
+                            break;
+                        }
+                    }
+                    modelPath = found;
+                }
+                if (File.Exists(modelPath))
+                {
+                    var modelStatus = Dlss5Pipeline.LoadDemoModel(modelPath);
+                    Console.WriteLine(modelStatus == Dlss5Status.Ok
+                        ? $"dlss: demonstration model loaded ({Dlss5Pipeline.LoadedModelLabel}) - {modelPath}"
+                        : $"error: demonstration model failed: {modelStatus} ({modelPath})");
+                }
+                else
+                {
+                    Console.WriteLine($"dlss: no demonstration model at {modelPath} " +
+                        "(run vr/fetch-demo-model.sh); the classical scaler is used");
+                }
                 dlss = new DlssSeam(gl, dlssDemoDir);
             }
             catch (Exception ex)

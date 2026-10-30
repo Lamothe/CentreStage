@@ -5,7 +5,8 @@
 // framebuffer (the demo geometry's 64x72, the native boundary's documented
 // bound), read the RGB bytes back for the native pipeline, and present the
 // returned frame as a nearest-filtered fullscreen texture. The transform
-// is the demonstration transform's real weights (NOT DLSS5) or the
+// is the demonstration transform's (NOT DLSS5: real open weights on the
+// neural path, a fixed kernel on the classical path) or the
 // synthetic pipeline's arbitrary one — either way this is on-demand
 // frame-by-frame processing with visible latency, not real-time
 // upscaling; callers show the mode's in-band label with every presented

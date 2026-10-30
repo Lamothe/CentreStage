@@ -137,14 +137,16 @@ pass — the one failure is the documented mouse gap below (evidence in
 input layer (ydotoold uinput) is STOCHASTIC on this session - events are
 lost randomly under CPU load and after idle periods, so no single suite
 run is complete. The behaviour matrix is proven across runs
-(`linux/verify-seam-risks.sh`, scenarios A-D; runs v3-v6):
+(`linux/verify-seam-risks.sh`, scenarios A-D; runs v3-v7; run v7's
+scenario A flaked entirely at the injection layer ("the app received
+input" failed first) while B/C/D passed):
 
 | path                                   | green evidence |
 |----------------------------------------|----------------|
 | F9 Trigger + worker/presenter          | v3, v5, v6     |
 | mid-flight close/Esc gating (deferral) | v3, v5         |
 | worker-fault handling + retry          | v3, v5, v6     |
-| F10 A/B toggle (the visible demo)      | v4, v6         |
+| F10 A/B toggle (the visible demo)      | v4, v6, v7     |
 | camera-drag Release (mouse wiring)     | v6             |
 | clean exit (rc 0)                      | v3, v4, v5, v6 |
 | F12 screenshot + non-blank content     | v3-v6          |

@@ -49,12 +49,31 @@ Diagnostic env vars: `CENTRESTAGE_WIREFRAME=1` (no culling/depth), `CENTRESTAGE_
 `CENTRESTAGE_STATUS_TEST=1` (with `--capture`: draws the status overlay after the model to
 verify overlay text survives the renderer's GL state).
 
-## Desktop integration (GNOME)
+## Desktop integration (GNOME) — open from Files
 
 `linux/install.sh` publishes the viewer to `~/.local/share/centrestage`, installs a
 `.desktop` entry and icon, and makes Centre Stage the default handler for `.glb`/`.gltf`
-(double-click in Files). Launching Centre Stage with no arguments opens a file picker.
-Re-run the script after pulling changes; it is idempotent.
+(**double-click a .glb/.gltf in the Files application opens it here**).
+Launching Centre Stage with no arguments opens a file picker.
+Re-run the script after pulling changes; it is idempotent — and required after
+every change, or Files launches stale code. It also builds the native seam
+library and ships it with the publish, and copies the demonstration models
+into `~/.local/share/dlss5-demo` (the app's first model-search path) when
+they exist in the dlss5-linux checkout — without them the install warns and
+the app runs with the classical demo only.
+
+The desktop entry launches forced onto X11/XWayland
+(`XDG_SESSION_TYPE=x11 WAYLAND_DISPLAY=wayland-none`, the same recipe as
+`linux/run-centrestage.sh`): under native Wayland the compositor owns
+window placement and the window lands wherever it decides (on this
+two-display setup, usually the wrong screen). Verified unattended
+(30/10/2026, evidence in `.evidence/files-launch/`): a `gio open` launch
+(what Files runs) opens the published app as an X11 client, the window
+maps at (50,50) on the Dell primary display (`xdotool getwindowgeometry`
+output in `launch-geometry.txt`), it renders the model
+(`shot-...png`, an F12 framebuffer capture), and the same published build
+processes an F9 demo frame end to end (`published-demo.log`: model loaded,
+12.19 s, label recorded).
 
 ## DLSS seam (dlss5-linux native host — demonstration transform, NOT DLSS5)
 

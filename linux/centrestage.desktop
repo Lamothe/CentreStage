@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Centre Stage
 Comment=View glTF and GLB 3D models
-Exec="@BINDIR@/CentreStage" %f
+Exec=env XDG_SESSION_TYPE=x11 WAYLAND_DISPLAY=wayland-none "@BINDIR@/CentreStage" %f
 Icon=centrestage
 Terminal=false
 Type=Application

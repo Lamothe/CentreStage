@@ -4,11 +4,12 @@
 // P/Invoke over the dlss5-linux native host boundary (vr/native-host.h).
 // The ABI is the tested C surface: create/evaluate/destroy over RGB frames,
 // the frames-since-reset counter, the arena report and the mode label that
-// a host MUST display alongside any presented output ("not DLSS5 -
+// a host must record alongside any presented output ("not DLSS5 -
 // demonstration transform with real weights (<model>, <license>)" for the
 // neural path; "not DLSS5 - classical demonstration scaler (Lanczos3 /
 // bilinear baseline)" for the fixed kernels; "synthetic weights - arbitrary
-// transform" otherwise). The demonstration
+// transform" otherwise; on-screen display is the host's UI choice -
+// CentreStage records it in the demo report, not as a banner). The demonstration
 // evaluator costs seconds per frame. Both are on-demand frame-by-frame
 // processing with visible latency, never real-time upscaling.
 using System.Reflection;
@@ -111,8 +112,9 @@ internal static partial class Dlss5Native
 /// <summary>
 /// One native pipeline over width x height RGB frames. The wrapper mirrors
 /// the ABI's contract: the output buffer is untouched unless the call
-/// returns Ok, and <see cref="Label"/> is the string the host displays with
-/// any presented frame (synthetic weights — the transform is arbitrary).
+/// returns Ok, and <see cref="Label"/> is the string the host must record
+/// with any presented frame (synthetic weights — the transform is
+/// arbitrary; on-screen display is the host's UI choice).
 /// </summary>
 internal sealed class Dlss5Pipeline : IDisposable
 {
@@ -141,13 +143,13 @@ internal sealed class Dlss5Pipeline : IDisposable
 
     public int Height { get; }
 
-    /// <summary>The in-band label a host must display with presented output.</summary>
+    /// <summary>The label a host must record with presented output.</summary>
     public static string Label =>
         Marshal.PtrToStringUTF8(Dlss5Native.Label()) ?? "synthetic weights — arbitrary transform";
 
     /// <summary>
-    /// The label for THIS pipeline's mode, mandatory on every presented
-    /// frame. The demonstration path's label names the actual transform
+    /// The label for THIS pipeline's mode, mandatory to RECORD with every
+    /// presented frame (on-screen display is the host's UI choice). The demonstration path's label names the actual transform
     /// ("demonstration transform with real weights (<model>)" for the
     /// neural path; "classical demonstration scaler (Lanczos3 / bilinear
     /// baseline)" for the fixed kernels).

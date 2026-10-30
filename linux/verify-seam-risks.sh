@@ -41,7 +41,7 @@
 # ydotool RPM; /dev/uinput must grant the user rw). Evidence (logs +
 # screenshots) is written to the output directory; NOTHING here enters Git.
 #
-# CENTRESTAGE_RISK_ONLY=A|B|C runs one scenario (each scenario starts its own
+# CENTRESTAGE_RISK_ONLY=A|B|C|D|E runs one scenario (each scenario starts its own
 # app instance; a single invocation runs A, then B, then C).
 set -u
 
@@ -190,7 +190,7 @@ launch() { # launch <log-file> [env VAR=...]
     ( cd "$ROOT" &&
       env CENTRESTAGE_WINDOW_POS=3480,120 CENTRESTAGE_LOG_KEYS=1 \
           CENTRESTAGE_SHOT_DIR="$OUT" "$@" \
-          CENTRESTAGE_AUTO_CLOSE_MS=600000 \
+          CENTRESTAGE_AUTO_CLOSE_MS="${RISK_AUTO_CLOSE_MS:-600000}" \
           dotnet run --project src/CentreStage -- "$MODEL" \
           > "$log" 2>&1 < /dev/null ) &
     APP_PID=$!
@@ -260,6 +260,26 @@ close_app() { # close_app <log-file> — a clean exit means rc 0; never inject
     while [ "$i" -lt 30 ] && kill -0 "$APP_PID" 2>/dev/null; do sleep 1; i=$((i + 1)); done
     if kill -0 "$APP_PID" 2>/dev/null; then
         echo "WARN: app did not exit after Escape; killing"
+        pkill -f '[C]entreStage/bin' 2>/dev/null
+        sleep 1
+        return 1
+    fi
+    wait "$APP_PID" 2>/dev/null
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "WARN: app exited with code $rc"
+        return 1
+    fi
+    return 0
+}
+
+close_auto() { # close_auto <log-file> — the auto-close hook exits the app;
+    # no injected keys (scenario E is the mouse scenario and the uinput
+    # layer is the documented stochastic flake).
+    local i=0 rc
+    while [ "$i" -lt 60 ] && kill -0 "$APP_PID" 2>/dev/null; do sleep 1; i=$((i + 1)); done
+    if kill -0 "$APP_PID" 2>/dev/null; then
+        echo "WARN: app did not auto-close; killing"
         pkill -f '[C]entreStage/bin' 2>/dev/null
         sleep 1
         return 1
@@ -374,12 +394,45 @@ run_D() {
     check "D: clean exit after Escape" close_app "$DLOG"
 }
 
+run_E() {
+    local ELOG="$OUT/E-button.log" MLOG="$OUT/E-menu.log"
+    say "scenario E: mouse controls (synthetic clicks through the real handlers)"
+    # OS-level pointer delivery is a MANUAL check (README): both injection
+    # layers are broken in this session (uinput events never reach the
+    # window; xdotool/XTEST mis-maps coordinates onto the compositor
+    # surface). The synth hooks drive the SAME handler entry points real
+    # mouse events call (HandleMouseDown / SynthMenuPick); Silk's own
+    # MouseDown dispatch is the only untested hop.
+    # Button centre at the 1280x800 default window: (1280-14-160, 14+19).
+    # Auto-close instead of injected Esc (see close_auto); scenario-local
+    # so no later scenario inherits the short timeout.
+    local RISK_AUTO_CLOSE_MS=60000
+    launch "$ELOG" CENTRESTAGE_SYNTH_CLICK="1106,33"
+    check "E: the button click reached the demo control" \
+        wait_log "$ELOG" "synth: click consumed by the demo control" 45
+    check "E: the button click requested one frame (F9 path)" \
+        wait_log "$ELOG" "F9 requested one frame" 30
+    check "E: the frame was processed (worker + presenter)" \
+        wait_log "$ELOG" "frame 1 processed" 60
+    check "E: clean auto-exit (rc 0)" close_auto "$ELOG"
+
+    launch "$MLOG" CENTRESTAGE_SYNTH_MENU="600,400,0"
+    check "E: the context menu opened at the click point" \
+        wait_log "$MLOG" "synth: menu at (600,400) item 0" 45
+    check "E: the menu pick requested one frame (F9 path)" \
+        wait_log "$MLOG" "F9 requested one frame" 30
+    check "E: the menu-picked frame was processed" \
+        wait_log "$MLOG" "frame 1 processed" 60
+    check "E: clean auto-exit (rc 0)" close_auto "$MLOG"
+}
+
 case "$ONLY" in
     A) run_A ;;
     B) run_B ;;
     C) run_C ;;
     D) run_D ;;
-    *) run_A; run_B; run_C; run_D ;;
+    E) run_E ;;
+    *) run_A; run_B; run_C; run_D; run_E ;;
 esac
 
 # --- summary ---------------------------------------------------------------

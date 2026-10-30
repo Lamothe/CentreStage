@@ -157,9 +157,9 @@ internal static class Program
         Console.WriteLine("       CentreStage <model.glb> --capture out.png [--frames N]");
         Console.WriteLine("       CentreStage <model.glb> --dlss-demo outdir   (unattended: live + processed evidence)");
         Console.WriteLine("viewer: F9 processes one frame through the dlss5-linux native host (frame-by-frame,");
-        Console.WriteLine("        not real-time; demonstration transform - \"not DLSS5 - demonstration transform");
-        Console.WriteLine("        with real weights (neural path)\" or \"not DLSS5 - classical demonstration");
-        Console.WriteLine("        scaler\" - the in-band label names the actual path).");
+        Console.WriteLine("        not real-time; the demo report records the transform label (\"not DLSS5 -");
+        Console.WriteLine("        demonstration transform with real weights\" or \"not DLSS5 - classical");
+        Console.WriteLine("        demonstration scaler\" - it names the actual path); the screen shows the view name).");
     }
 
     /// <summary>
@@ -409,6 +409,15 @@ internal static class Program
         var closeRequested = false;
         var closeDeferralLogged = false;
         string? shotPending = null;
+
+        // Test hooks (see README "Seam-risk verification"): scripted clicks
+        // through the SAME handler entry points mouse events call. The OS
+        // pointer delivery itself is a documented manual check.
+        var synthClick = Environment.GetEnvironmentVariable("CENTRESTAGE_SYNTH_CLICK");
+        var synthMenu = Environment.GetEnvironmentVariable("CENTRESTAGE_SYNTH_MENU");
+        var synthMenuShot = Environment.GetEnvironmentVariable("CENTRESTAGE_SYNTH_MENU_SHOT");
+        var synthFired = false;
+        var synthFrames = 0;
         var closingPainted = false;
         var loadFailed = false;
         var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -544,7 +553,10 @@ internal static class Program
                     // below), where the back buffer holds the completed frame.
                     var dir = Environment.GetEnvironmentVariable("CENTRESTAGE_SHOT_DIR") ?? "shots";
                     shotPending = Path.Combine(dir, $"shot-{DateTime.Now:yyyyMMdd-HHmmss-fff}.png");
-                });
+                },
+                onUiMouseDown: (x, y, w, h) => dlss?.HandleMouseDown(x, y, w, h) == true,
+                onUiRightClick: (x, y, w, h) => dlss?.HandleRightClick(x, y, w, h) == true,
+                onUiMouseMove: (x, y) => dlss?.HandleMouseMove(x, y));
         };
 
         window.Render += delta =>
@@ -564,6 +576,44 @@ internal static class Program
             var width = window.FramebufferSize.X;
             var height = window.FramebufferSize.Y;
             var elapsed = (float)clock.Elapsed.TotalSeconds;
+
+            // Fire the synthetic click once the app is ready (the UI is up
+            // and the seam exists).
+            synthFrames++;
+            if (!synthFired && synthFrames > 30 && stage == LoadStage.Ready
+                && dlss is not null && dlssDemoDir is null)
+            {
+                synthFired = true;
+                if (!string.IsNullOrEmpty(synthClick)
+                    && synthClick.Split(',') is { Length: 2 } c
+                    && float.TryParse(c[0], out var cx) && float.TryParse(c[1], out var cy))
+                {
+                    var dbg = CentreStage.Core.DemoUi.Button(width, 0);
+                    Console.WriteLine($"synth: click at ({cx},{cy}) frame {width}x{height} "
+                        + $"button {dbg.X},{dbg.Y} {dbg.W}x{dbg.H}");
+                    if (dlss.HandleMouseDown(cx, cy, width, height))
+                    {
+                        Console.WriteLine("synth: click consumed by the demo control");
+                    }
+                }
+                if (!string.IsNullOrEmpty(synthMenu)
+                    && synthMenu.Split(',') is { Length: 3 } m
+                    && float.TryParse(m[0], out var mx) && float.TryParse(m[1], out var my)
+                    && int.TryParse(m[2], out var item))
+                {
+                    Console.WriteLine($"synth: menu at ({mx},{my}) item {item}");
+                    dlss.SynthMenuPick(mx, my, item, width, height);
+                }
+                if (!string.IsNullOrEmpty(synthMenuShot)
+                    && synthMenuShot.Split(',') is { Length: 2 } ms
+                    && float.TryParse(ms[0], out var sx) && float.TryParse(ms[1], out var sy))
+                {
+                    Console.WriteLine($"synth: menu screenshot at ({sx},{sy})");
+                    dlss.SynthMenuOpen(sx, sy, width, height);
+                    var dir = Environment.GetEnvironmentVariable("CENTRESTAGE_SHOT_DIR") ?? "shots";
+                    shotPending = Path.Combine(dir, "menu-open.png");
+                }
+            }
 
             if (closeRequested && stage != LoadStage.Closing)
             {
@@ -814,7 +864,10 @@ internal static class Program
     private static void HookInput(IWindow window, OrbitCamera camera, Action requestClose,
         Func<AnimationPlayback?>? playback = null, Action? onDlssFrame = null, Action? onCameraInput = null,
         Action? onDlssToggleAB = null,
-        Action? onScreenshot = null)
+        Action? onScreenshot = null,
+        Func<float, float, int, int, bool>? onUiMouseDown = null,
+        Func<float, float, int, int, bool>? onUiRightClick = null,
+        Action<float, float>? onUiMouseMove = null)
     {
         var input = window.CreateInput();
         var getPlayback = playback;
@@ -904,8 +957,34 @@ internal static class Program
         var lastClickTicks = 0L;
         var lastClickPos = new Vector2(float.NaN, float.NaN);
 
+        MouseButton? uiPressButton = null;
+        Vector2 ToFramebuffer(System.Numerics.Vector2 position) => new(
+            position.X * window.FramebufferSize.X / Math.Max(1, window.Size.X),
+            position.Y * window.FramebufferSize.Y / Math.Max(1, window.Size.Y));
+
         primary.MouseDown += (mouse, button) =>
         {
+            var fb = ToFramebuffer(new System.Numerics.Vector2(mouse.Position.X, mouse.Position.Y));
+            if (button == MouseButton.Left
+                && onUiMouseDown?.Invoke(fb.X, fb.Y, window.FramebufferSize.X,
+                    window.FramebufferSize.Y) == true)
+            {
+                // The demo control ate the click: no orbit, no double-click.
+                // Record WHICH button: MouseUp must still clear any drag
+                // state a previous press left behind (see below).
+                uiPressButton = button;
+                lastClickTicks = 0;
+                return;
+            }
+            if (button == MouseButton.Right
+                && onUiRightClick?.Invoke(fb.X, fb.Y, window.FramebufferSize.X,
+                    window.FramebufferSize.Y) == true)
+            {
+                // The context menu ate the click: no pan.
+                uiPressButton = button;
+                return;
+            }
+
             dragging = button == MouseButton.Left;
             panning = button == MouseButton.Right || button == MouseButton.Middle;
             if (button == MouseButton.Left)
@@ -930,6 +1009,10 @@ internal static class Program
         };
         primary.MouseUp += (_, button) =>
         {
+            // Always clear the drag state for the released button: a UI
+            // press must never leave dragging/panning stuck (the old
+            // button-agnostic swallow did exactly that when another
+            // button's release was eaten by the UI).
             if (button == MouseButton.Left)
             {
                 dragging = false;
@@ -939,9 +1022,16 @@ internal static class Program
             {
                 panning = false;
             }
+            if (uiPressButton == button)
+            {
+                uiPressButton = null;
+            }
         };
         primary.MouseMove += (_, position) =>
         {
+            var fb = ToFramebuffer(new System.Numerics.Vector2(position.X, position.Y));
+            onUiMouseMove?.Invoke(fb.X, fb.Y);
+
             // Silk.NET reports absolute positions; orbit/pan need per-event deltas.
             var current = new Vector2(position.X, position.Y);
             if (float.IsNaN(lastPosition.X))

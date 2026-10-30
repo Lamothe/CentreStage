@@ -32,8 +32,10 @@ dotnet run --project src/CentreStage -- <model.glb> --capture out.png   # offscr
 dotnet run --project src/CentreStage -- <model.glb> --dlss-demo outdir  # unattended DLSS evidence run
 ```
 
-Mouse: left-drag orbit, right/middle-drag pan, scroll zoom, double-click or F11 toggles
-fullscreen, F9 processes one frame through the DLSS seam (see below), F12 saves a
+Mouse: left-drag orbit, middle-drag pan, scroll zoom, double-click or F11 toggles
+fullscreen (right-click opens the demo's context menu while the seam is
+active, so it no longer pans), F9 processes one frame through the DLSS
+seam (see below), F12 saves a
 screenshot of the frame just drawn (`CENTRESTAGE_SHOT_DIR`, default `./shots`), Esc quits. The
 interactive viewer opens immediately and shows progress ("Parsing",
 "Uploading textures n/N", "Closing") via an antialiased TrueType status overlay
@@ -61,7 +63,9 @@ An optional seam wires the tested C host ABI of the dlss5-linux project
 `linux/build-native-host.sh`; `DLSS5_LINUX=/path/to/dlss5-linux` selects the
 checkout): the current view is rendered into a low-resolution framebuffer (the
 seam's capture geometry), read back, processed on a worker thread, and the returned
-frame is presented fullscreen with the in-band label in the status text.
+frame is presented fullscreen with the view name in the status text (the
+transform label is recorded in the demo report and console - see the
+label policy below).
 
 By default the seam runs the **neural demonstration transform** (NOT
 DLSS5): a real learned upscaler with real openly licensed weights
@@ -74,15 +78,27 @@ verdict) and stays available as the "extreme" stress case
 the synthetic pipeline at 64x72). **F10 cycles the presented result
 through the A/B views at the SAME capture** (one capture, re-processed):
 neural -> plain stretch baseline (bilinear) -> classical sharp stretch
-(Lanczos3). The label the seam displays with every presented frame names
-the actual path - "not DLSS5 - demonstration transform with real weights
-(EDSR-base x2, Apache-2.0)" on the neural path, "not DLSS5 - classical
-demonstration scaler (...)" on the two classical views. **Every presented
-frame carries its label; the phrase "real weights" belongs only to the
+(Lanczos3). The transform label names the actual path and is **recorded with every
+presented frame** (demo report + console): "not DLSS5 - demonstration
+transform with real weights (EDSR-base x2, Apache-2.0)" on the neural
+path, "not DLSS5 - classical demonstration scaler (...)" on the two
+classical views, "synthetic weights - arbitrary transform" in synthetic
+mode. The phrase "real weights" belongs only to the
 neural path. This proves the platform end to end; it is NOT a DLSS5
 quality claim and must never be conflated with one.** Processing is
 frame-by-frame (F9-triggered) by design; the neural evaluate is ~11 s at
 this geometry (the classical views are milliseconds).
+
+**Mouse controls** (the demo runs from the mouse alone): an
+**ENLARGE THIS VIEW (F9)** button sits at the top-right of the window -
+state-aware, so it becomes **NEXT COMPARISON VIEW (F10)** and **BACK TO
+LIVE VIEW** while a result is pinned, **WORKING...** while a frame is in
+flight and **TRY AGAIN (F9)** after a failure. **Right-click anywhere**
+opens the same controls as a context menu. Screen policy: the app carries
+**no "not DLSS5" banner** (Michael's UI preference) - the presented state
+names the view and what happened to the pixels; the transform label
+("not DLSS5 - demonstration transform with real weights (EDSR...)") is
+**recorded in the demo report and console**, never bannered on screen.
 
 **The HUD explains itself in plain words** (a first-time viewer needs no
 docs): the live view says what F9 does; the in-flight state reads "view
@@ -131,7 +147,7 @@ work, but the app itself paints rarely until the session wakes.
 
 Workflow: **F9** captures the current view and starts one processing run;
 the live view keeps rendering while "processing" shows; when the result
-arrives it pins fullscreen with the mode's label and the measured
+arrives it pins fullscreen with the view name and the measured
 latency. Any camera input (or F9 again) returns to the live view. In the
 stateless demonstration mode the frames-since-reset counter stays 0; the
 synthetic path sequences temporally across frames. Nothing changes when
@@ -164,12 +180,25 @@ teardown was deferred), the app keeps painting, completes the frame and
 exits 0 (the exit code is checked);
 **C** — the worker-fault path (`CENTRESTAGE_DLSS_FAULT=throw-once` makes the
 first evaluation fault on the worker; the fault is handled without crashing
-the app and a retry from Failed recovers). Latest full run (v7d, the
-final comprehensibility binary): **26/27** - A 6/7 (the mouse gap below
-only), B 6/6, C 6/6, D 8/8 (evidence: `.evidence/seam-risks-v7d/` and
-`.evidence/seam-risks-v7d-D/`; D's assertions track the plain-words view
-names and the suite defaults to the demo subject
-`Teen_Kitty_rigged.glb`, `CENTRESTAGE_RISK_MODEL` overrides).
+the app and a retry from Failed recovers). **E** — the mouse controls:
+synthetic clicks (`CENTRESTAGE_SYNTH_CLICK="x,y"`,
+`CENTRESTAGE_SYNTH_MENU="x,y,item"`) drive the same handler entry points
+real mouse events call (the button click and the context-menu pick each
+request a frame and process it; auto-close instead of injected Esc).
+Scenario E run: **8/8** (`.evidence/seam-risks-E3/`). Honest scope: the
+OS pointer delivery is a MANUAL check - both injection layers are broken
+in this session (uinput mouse events never reach the window; xdotool
+XTEST mis-maps coordinates onto the compositor surface - probed with an
+extracted xdotool 3.20211022), so Silk's own MouseDown dispatch is the
+only untested hop. Manual recipe: run the viewer, click **ENLARGE THIS
+VIEW** (top-right) - a frame must process and pin; right-click must open
+the menu; **NEXT COMPARISON VIEW** must swap the presented view.
+
+Latest full run (v7d, the comprehensibility binary): **26/27** - A 6/7
+(the mouse gap below only), B 6/6, C 6/6, D 8/8 (evidence:
+`.evidence/seam-risks-v7d/` and `.evidence/seam-risks-v7d-D/`; the suite
+defaults to the demo subject `Teen_Kitty_rigged.glb`,
+`CENTRESTAGE_RISK_MODEL` overrides).
 
 **Input-injection reality (documented, not overclaimed):** the unattended
 input layer (ydotoold uinput) is STOCHASTIC on this session - events are
@@ -200,6 +229,9 @@ Test/diagnostic hooks: the F12 screenshot key is always available (harmless
 in normal use). Env-gated (all off by default): `CENTRESTAGE_DLSS_FAULT=throw-once`
 (fault injection for the worker path), `CENTRESTAGE_LOG_KEYS=1` (log key
 events), `CENTRESTAGE_SHOT_DIR` (screenshot directory),
+`CENTRESTAGE_SYNTH_CLICK="x,y"` / `CENTRESTAGE_SYNTH_MENU="x,y,item"` /
+`CENTRESTAGE_SYNTH_MENU_SHOT="x,y"` (scenario E's scripted clicks and the
+menu-open evidence capture; never fired in `--dlss-demo` mode),
 `CENTRESTAGE_AUTO_CLOSE_MS` (automatic close for unattended runs). The
 window-close button cannot be deferred (Silk.NET's Closing event is not
 cancellable): pressed while a frame is evaluating, teardown blocks for at

@@ -6,14 +6,17 @@
 // geometry — it is never presented as real-time). One trigger captures the
 // current view into the low-resolution framebuffer, evaluates it on a worker
 // thread while the live view keeps rendering, then pins the returned frame as
-// the presented view with the in-band label ("synthetic weights — arbitrary
-// transform") in the status text. Any camera input returns to the live view.
+// the presented view, named in the status text ("synthetic pipeline
+// result" etc.); the transform label ("synthetic weights — arbitrary
+// transform") is recorded, not bannered (the label policy below). Any
+// camera input returns to the live view.
 // The app's own workflow is untouched when the seam is idle.
 //
 // The unattended demo mode (--dlss-demo <dir>) drives the same path: it
 // screenshots the live view, processes one frame, screenshots the presented
-// result (label in-band), writes a report with the measured latency and
-// closes — evidence to disk for headless-at-the-keyboard runs.
+// result, writes a report with the measured latency AND the transform
+// label (recorded there, not shown on screen) and closes — evidence to
+// disk for headless-at-the-keyboard runs.
 using System.Diagnostics;
 using System.Numerics;
 using Silk.NET.OpenGL;
@@ -123,10 +126,14 @@ internal sealed class DlssSeam : IDisposable
             {
                 foreach (var v in _pinnedViews)
                 {
-                    labels.Add(v.Name == "neural"
-                        ? "neural: " + Dlss5Pipeline.LoadedModelLabel
-                        : $"{v.Name}: not DLSS5 - classical demonstration " +
-                          $"scaler ({(v.Name == "bilinear" ? "bilinear baseline" : "Lanczos3")})");
+                    labels.Add(v.Name switch
+                    {
+                        "neural" => "neural: " + Dlss5Pipeline.LoadedModelLabel,
+                        "synthetic" => "synthetic: synthetic weights - arbitrary " +
+                            "transform (not DLSS5)",
+                        _ => $"{v.Name}: not DLSS5 - classical demonstration " +
+                            $"scaler ({(v.Name == "bilinear" ? "bilinear baseline" : "Lanczos3")})",
+                    });
                 }
             }
             return labels;
@@ -151,6 +158,171 @@ internal sealed class DlssSeam : IDisposable
     private int _demoStage;
     private long _demoFrame;
 
+    private readonly CentreStage.Core.DemoUi _ui = new();
+
+    /// <summary>
+    /// A left click on a demo control. Returns true when the click is
+    /// consumed (it must not also orbit the camera).
+    /// </summary>
+    public bool HandleMouseDown(float x, float y, int frameWidth, int frameHeight)
+    {
+        if (_pipeline is null)
+        {
+            return false;
+        }
+
+        if (_ui.MenuOpen)
+        {
+            // The menu eats every click while open: choose an item or dismiss.
+            var item = _ui.HoveredItem(x, y, CentreStage.Core.DemoUi.MenuActions.Length);
+            if (item >= 0 && ActionEnabled(CentreStage.Core.DemoUi.MenuActions[item]))
+            {
+                DoAction(CentreStage.Core.DemoUi.MenuActions[item]);
+            }
+            _ui.CloseMenu();
+            return true;
+        }
+
+        foreach (var (action, _) in Buttons)
+        {
+            var rect = CentreStage.Core.DemoUi.Button(frameWidth, IndexOf(action));
+            if (rect.Contains(x, y))
+            {
+                if (action is { } a && ActionEnabled(a))
+                {
+                    DoAction(a);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// A right click opens the demo's context menu (the mouse-driven way to
+    /// run the experiment). Returns true when consumed (it must not also pan).
+    /// </summary>
+    public bool HandleRightClick(float x, float y, int frameWidth, int frameHeight)
+    {
+        if (_pipeline is null)
+        {
+            return false;
+        }
+        if (_ui.MenuOpen)
+        {
+            _ui.CloseMenu();
+            return true;
+        }
+        _ui.OpenMenu(x, y, frameWidth, frameHeight,
+            CentreStage.Core.DemoUi.MenuActions.Length);
+        return true;
+    }
+
+    /// <summary>Test hook: open the context menu at (x, y) and leave it up.</summary>
+    public void SynthMenuOpen(float x, float y, int frameWidth, int frameHeight)
+    {
+        // A fresh open: an already-open menu would CLOSE on the right
+        // click (real toggling), leaving no menu up.
+        if (_ui.MenuOpen)
+        {
+            _ui.CloseMenu();
+        }
+        HandleRightClick(x, y, frameWidth, frameHeight);
+    }
+
+    /// <summary>
+    /// Test hook: right-click at (x, y) then choose the given menu item -
+    /// the same Handle* entry points real mouse events call, so the whole
+    /// mouse path is exercised minus the OS pointer delivery.
+    /// </summary>
+    public void SynthMenuPick(float x, float y, int item, int frameWidth, int frameHeight)
+    {
+        item = Math.Clamp(item, 0, CentreStage.Core.DemoUi.MenuActions.Length - 1);
+        if (_ui.MenuOpen)
+        {
+            _ui.CloseMenu();
+        }
+        HandleRightClick(x, y, frameWidth, frameHeight);
+        var rect = _ui.MenuItem(item);
+        var cx = rect.X + rect.W * 0.5f;
+        var cy = rect.Y + rect.H * 0.5f;
+        HandleMouseMove(cx, cy);
+        HandleMouseDown(cx, cy, frameWidth, frameHeight);
+    }
+
+    /// <summary>Tracks the cursor for menu hover (never consumes).</summary>
+    public void HandleMouseMove(float x, float y)
+    {
+        _hoverItem = _ui.MenuOpen
+            ? _ui.HoveredItem(x, y, CentreStage.Core.DemoUi.MenuActions.Length)
+            : -1;
+    }
+
+    private int _hoverItem = -1;
+
+    private void DoAction(CentreStage.Core.DemoAction action)
+    {
+        switch (action)
+        {
+            case CentreStage.Core.DemoAction.Enlarge:
+                Trigger();
+                break;
+            case CentreStage.Core.DemoAction.NextView:
+                ToggleAB();
+                break;
+            case CentreStage.Core.DemoAction.BackToLive:
+                BackToLive();
+                break;
+        }
+    }
+
+    /// <summary>The on-screen control's way back to the live view.</summary>
+    public void BackToLive()
+    {
+        if (_state == State.Presenting)
+        {
+            _state = State.Idle;
+            Console.WriteLine("dlss: the on-screen control returned to the live view");
+        }
+    }
+
+    private bool ActionEnabled(CentreStage.Core.DemoAction action) => action switch
+    {
+        CentreStage.Core.DemoAction.Enlarge => _state is State.Idle or State.Failed,
+        CentreStage.Core.DemoAction.NextView => _state == State.Presenting,
+        CentreStage.Core.DemoAction.BackToLive => _state == State.Presenting,
+        _ => false,
+    };
+
+    private int IndexOf(CentreStage.Core.DemoAction? action)
+    {
+        var index = 0;
+        foreach (var (candidate, _) in Buttons)
+        {
+            if (candidate == action)
+            {
+                return index;
+            }
+            index++;
+        }
+        return index;
+    }
+
+    /// <summary>The visible controls for the current state (top to bottom).</summary>
+    private List<(CentreStage.Core.DemoAction? Action, string Text)> Buttons => _state switch
+    {
+        State.Processing => new() { (null, "WORKING... (this takes seconds)") },
+        State.Presenting => new()
+        {
+            (CentreStage.Core.DemoAction.NextView, "NEXT COMPARISON VIEW  (F10)"),
+            (CentreStage.Core.DemoAction.BackToLive, "BACK TO LIVE VIEW"),
+        },
+        State.Failed => new() { (CentreStage.Core.DemoAction.Enlarge, "TRY AGAIN  (F9)") },
+        _ => _pipeline is null
+            ? new()
+            : new() { (CentreStage.Core.DemoAction.Enlarge, "ENLARGE THIS VIEW  (F9)") },
+    };
+
     public DlssSeam(GL gl, string? demoDir)
     {
         _gl = gl;
@@ -162,9 +334,11 @@ internal sealed class DlssSeam : IDisposable
         }
     }
 
-    /// <summary>The in-band label shown with every presented frame.</summary>
-    /// <summary>The label for the current mode (the demonstration
-    /// transform's mandatory label in demo mode).</summary>
+    /// <summary>
+    /// The transform's honesty label. NOT shown on screen (the UI carries
+    /// no disclaimer banner - Michael's preference); it is recorded in the
+    /// demo report and available to any host via the ABI.
+    /// </summary>
     public string Label => _pipeline?.LabelFor ?? Dlss5Pipeline.Label;
 
     /// <summary>
@@ -216,6 +390,23 @@ internal sealed class DlssSeam : IDisposable
             return;
         }
         try
+        {
+            EnsurePipeline();
+        }
+        catch (Exception ex)
+        {
+            _state = State.Failed;
+            _failure = ex.Message;
+            Console.Error.WriteLine($"error: DLSS seam unavailable: {ex.Message}");
+            return;
+        }
+        _failure = null; // a retry after Failed starts a fresh failure report
+        _state = State.Idle; // capture happens at the next frame's start
+        _capturePending = true;
+    }
+
+    private void EnsurePipeline()
+    {
         {
             if (_pipeline is null)
             {
@@ -281,16 +472,6 @@ internal sealed class DlssSeam : IDisposable
                     + $"{_pipeline.OutputWidth}x{_pipeline.OutputHeight} presented");
             }
         }
-        catch (Exception ex)
-        {
-            _state = State.Failed;
-            _failure = ex.Message;
-            Console.Error.WriteLine($"error: DLSS seam unavailable: {ex.Message}");
-            return;
-        }
-        _failure = null; // a retry after Failed starts a fresh failure report
-        _state = State.Idle; // capture happens at the next frame's start
-        _capturePending = true;
     }
 
     /// <summary>
@@ -429,6 +610,10 @@ internal sealed class DlssSeam : IDisposable
                         $"  dlss: frame {_processed} processed in {_lastSeconds:F2} s "
                         + $"(capture-to-presented {_presentationSeconds:F2} s, "
                         + $"{_pipeline!.Counter} since reset) - frame-by-frame, not real-time");
+                    // The transform label is recorded with every presented
+                    // frame (the contract: it must not be lost from the
+                    // host's records - on-screen display is a UI choice).
+                    Console.WriteLine($"  dlss: transform label (recorded): {Label}");
                 }
             }
             catch (Exception ex)
@@ -458,6 +643,20 @@ internal sealed class DlssSeam : IDisposable
     public void EndFrame(StatusOverlay overlay, int frameBufferWidth, int frameBufferHeight,
         float elapsed, Action requestClose)
     {
+        try
+        {
+            EnsurePipeline();
+        }
+        catch (Exception ex)
+        {
+            if (_state != State.Failed)
+            {
+                _state = State.Failed;
+                _failure = ex.Message;
+                Console.Error.WriteLine($"error: DLSS seam unavailable: {ex.Message}");
+            }
+        }
+
         if (_state == State.Processing)
         {
             overlay.DrawHud(frameBufferWidth, frameBufferHeight,
@@ -470,12 +669,15 @@ internal sealed class DlssSeam : IDisposable
         }
         else if (_state == State.Presenting)
         {
-            overlay.DrawStatus(frameBufferWidth, frameBufferHeight, Label,
+            // The screen names the view only - no disclaimer banner
+            // (Michael's UI preference). The transform label is recorded
+            // in the demo report instead.
+            overlay.DrawHud(frameBufferWidth, frameBufferHeight,
                 $"{ViewName} - {PlainDescription} | enlarged to "
                 + $"{_pipeline?.OutputWidth}x{_pipeline?.OutputHeight}, processed in "
                 + $"{_lastSeconds:F1} s (frame-by-frame, not real-time) | "
                 + "F9 or camera movement: back to the live view",
-                -1f, elapsed);
+                17f, new Vector4(0.85f, 0.88f, 0.93f, 0.92f));
         }
         else if (_state == State.Failed)
         {
@@ -495,6 +697,8 @@ internal sealed class DlssSeam : IDisposable
             overlay.DrawHud(frameBufferWidth, frameBufferHeight, hint,
                 17f, new Vector4(0.80f, 0.85f, 0.93f, 0.92f));
         }
+
+        DrawControls(overlay, frameBufferWidth, frameBufferHeight);
 
         if (_demoDir is null)
         {
@@ -804,7 +1008,7 @@ internal sealed class DlssSeam : IDisposable
             capture geometry: {_captureW}x{_captureH} -> {_pipeline?.OutputWidth}x{_pipeline?.OutputHeight} presented
             views (F10 cycles at the SAME capture): {string.Join(", ", labels)}
             A/B pair: {((_pipeline?.DemoScale ?? 0) == 0 ? "not attempted (synthetic mode)" : _abMissing ? "MISSING (an alternate pass failed)" : $"{_pinnedViews?.Length ?? 0} view(s) captured")}
-            in-band label: {Label}
+            transform label (recorded here, not shown on screen): {Label}
             frames processed: {_processed}
             last evaluate: {_lastSeconds:F2} s (worker wall clock around the native call)
             capture-to-presented: {_presentationSeconds:F2} s (includes the render loop's
@@ -960,6 +1164,77 @@ internal sealed class DlssSeam : IDisposable
         }
     }
 
+    /// <summary>
+    /// The mouse affordances: the state's buttons at the top-right and the
+    /// right-click context menu on top. Plain words, same actions as the
+    /// keys; the buttons are also IN the screenshots, so the evidence
+    /// shows the first-time viewer where to click.
+    /// </summary>
+    private void DrawControls(StatusOverlay overlay, int frameWidth, int frameHeight)
+    {
+        if (_pipeline is null)
+        {
+            return;
+        }
+
+        var bg = new Vector4(0.10f, 0.11f, 0.14f, 0.88f);
+        var fg = new Vector4(0.92f, 0.94f, 0.97f, 1f);
+        var dim = new Vector4(0.55f, 0.58f, 0.64f, 1f);
+        var accent = new Vector4(0.25f, 0.42f, 0.68f, 0.95f);
+
+        var buttons = Buttons;
+        for (var i = 0; i < buttons.Count; ++i)
+        {
+            var (action, text) = buttons[i];
+            var rect = CentreStage.Core.DemoUi.Button(frameWidth, i);
+            overlay.FillRect(rect.X, rect.Y, rect.W, rect.H, bg);
+            var enabled = action is { } a && ActionEnabled(a);
+            var label = enabled || action is null ? text : text + " (busy)";
+            var width = overlay.TextWidth(label, 17f);
+            overlay.DrawText(label, rect.X + (rect.W - width) * 0.5f,
+                rect.Y + (rect.H - 20f) * 0.5f, 17f, enabled ? fg : dim);
+        }
+
+        if (_ui.MenuOpen)
+        {
+            DrawMenu(overlay);
+        }
+
+        // The batch must flush HERE on every path: DrawStatus/DrawHud reset
+        // the vertex buffer at the start of their next call.
+        overlay.Flush();
+    }
+
+    private void DrawMenu(StatusOverlay overlay)
+    {
+        var bg = new Vector4(0.10f, 0.11f, 0.14f, 0.88f);
+        var fg = new Vector4(0.92f, 0.94f, 0.97f, 1f);
+        var dim = new Vector4(0.55f, 0.58f, 0.64f, 1f);
+        var accent = new Vector4(0.25f, 0.42f, 0.68f, 0.95f);
+        var itemCount = CentreStage.Core.DemoUi.MenuActions.Length;
+        var panel = _ui.MenuPanel(itemCount);
+        overlay.FillRect(panel.X, panel.Y, panel.W, panel.H, bg);
+        for (var i = 0; i < itemCount; ++i)
+        {
+            var action = CentreStage.Core.DemoUi.MenuActions[i];
+            var item = _ui.MenuItem(i);
+            if (i == _hoverItem)
+            {
+                overlay.FillRect(item.X, item.Y, item.W, item.H, accent);
+            }
+            var text = action switch
+            {
+                CentreStage.Core.DemoAction.Enlarge => "Enlarge this view  (F9)",
+                CentreStage.Core.DemoAction.NextView => "Next comparison view  (F10)",
+                _ => "Back to live view",
+            };
+            var enabled = ActionEnabled(action);
+            var width = overlay.TextWidth(text, 17f);
+            overlay.DrawText(text, item.X + (item.W - width) * 0.5f,
+                item.Y + (item.H - 20f) * 0.5f, 17f, enabled ? fg : dim);
+        }
+    }
+
     private static string DemoFileFor(string name) => name switch
     {
         "neural" => "processed.png",
@@ -978,7 +1253,7 @@ internal sealed class DlssSeam : IDisposable
 
     /// <summary>
     /// The side-by-side evidence: a 2x2 grid of the captured screenshots.
-    /// Each panel is the full window WITH its in-band HUD label, so the
+    /// Each panel is the full window with its HUD status line, so the
     /// composite labels itself. Missing views leave dark slots.
     /// </summary>
     private void BuildComposite(int width, int height)

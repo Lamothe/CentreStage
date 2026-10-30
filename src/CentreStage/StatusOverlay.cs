@@ -215,6 +215,10 @@ internal sealed class StatusOverlay : IDisposable
         }
     }
 
+    /// <summary>A solid rectangle in top-left pixel coordinates.</summary>
+    public void FillRect(float x, float y, float w, float h, Vector4 color)
+        => PushSolid(color, x, y, w, h);
+
     private void PushSolid(Vector4 color, float x, float y, float w, float h)
         => PushQuad(color, x, y, w, h, -1f, -1f, -1f, -1f);
 
@@ -258,7 +262,12 @@ internal sealed class StatusOverlay : IDisposable
         _vertsUsed += 6 * VertexFloats;
     }
 
-    private void Flush()
+    /// <summary>
+    /// Draws and clears the current batch. DrawStatus/DrawHud flush their
+    /// own batches (and reset the buffer first), so raw FillRect/DrawText
+    /// callers must call this themselves or their quads never render.
+    /// </summary>
+    public void Flush()
     {
         if (_vertsUsed == 0)
         {

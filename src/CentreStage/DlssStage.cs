@@ -9,7 +9,7 @@
 // neural path, a fixed kernel on the classical path) or the
 // synthetic pipeline's arbitrary one — either way this is on-demand
 // frame-by-frame processing with visible latency, not real-time
-// upscaling; callers show the mode's in-band label with every presented
+// upscaling; callers record the mode's label with every presented
 // frame (Dlss5Pipeline.LabelFor).
 using Silk.NET.OpenGL;
 

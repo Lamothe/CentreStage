@@ -63,29 +63,58 @@ checkout): the current view is rendered into a low-resolution framebuffer (the
 seam's capture geometry), read back, processed on a worker thread, and the returned
 frame is presented fullscreen with the in-band label in the status text.
 
-By default the seam runs the **demonstration transform** (NOT DLSS5): a
-real openly documented Lanczos3 upscaler with real weights (dlss5-linux's
-`vr/NATIVE-DEMO-UPSCALE.md`) behind the identical ABI/capture/present
-path. Geometry (the seam's knob): a **half-window capture upscaled x2**
-(640x400 -> 1280x800 at the default window) - the geometry that looks
-sharp; the earlier 64x72 x4 capture is imperceptible (Michael's F9
+By default the seam runs the **neural demonstration transform** (NOT
+DLSS5): a real learned upscaler with real openly licensed weights
+(EDSR-base x2, Apache-2.0; dlss5-linux's `vr/NATIVE-DEMO-UPSCALE.md`) behind
+the identical ABI/capture/present path. Geometry (the seam's knob): a
+**half-window capture upscaled x2** (640x400 -> 1280x800 at the default
+window); the earlier 64x72 x4 capture is imperceptible (Michael's F9
 verdict) and stays available as the "extreme" stress case
 (`CENTRESTAGE_DLSS_EXTREME=1`; `CENTRESTAGE_DLSS_SYNTHETIC=1` selects
-the synthetic pipeline at 64x72). Measured quality at the x2 ratio (the
-harness's generated source vs a bilinear baseline): PSNR 20.49 vs
-19.62 dB, SSIM 0.9138 vs 0.9067 - the SSIM margin is small and stated
-plainly; the case is the visible A/B, not the number. **F10 swaps the
-presented result between the Lanczos3 transform and the bilinear
-baseline at the SAME capture geometry** (evidence:
-`.evidence/dlss-demo-ab/{processed,baseline}.png` differ in 1.2% of RGB bytes). The label the seam displays with every presented frame is
-exactly:
+the synthetic pipeline at 64x72). **F10 cycles the presented result
+through the A/B views at the SAME capture** (one capture, re-processed):
+neural -> plain stretch baseline (bilinear) -> classical sharp stretch
+(Lanczos3). The label the seam displays with every presented frame names
+the actual path - "not DLSS5 - demonstration transform with real weights
+(EDSR-base x2, Apache-2.0)" on the neural path, "not DLSS5 - classical
+demonstration scaler (...)" on the two classical views. **Every presented
+frame carries its label; the phrase "real weights" belongs only to the
+neural path. This proves the platform end to end; it is NOT a DLSS5
+quality claim and must never be conflated with one.** Processing is
+frame-by-frame (F9-triggered) by design; the neural evaluate is ~11 s at
+this geometry (the classical views are milliseconds).
 
-    not DLSS5 - demonstration transform with real weights
+**The HUD explains itself in plain words** (a first-time viewer needs no
+docs): the live view says what F9 does; the in-flight state reads "view
+captured at half resolution - enlarging it now"; the presented state
+names the view ("neural upscaler result" / "plain stretch baseline" /
+"classical sharp stretch") and says what happened to the pixels.
 
-**Every presented frame carries that label. This proves the platform end
-to end; it is NOT a DLSS5 quality claim and must never be conflated with
-one.** Processing is frame-by-frame (F9-triggered) by design; the
-demonstration transform itself costs milliseconds at this geometry.
+**Test asset and framing** (this section's evidence): the subject is
+`Teen_Kitty_rigged.glb` (Michael's choice after the pixel-girl assets
+proved unreadable); the demo runs frame a documented **detail framing -
+the top 35% of the model's height** (for a character: face, hair,
+shoulders - the region where upscaling differences are visible; the
+whole-body framing wastes the frame on dark background and an earlier
+whole-car trial measured only a 2.1% A/B difference). The app's normal
+view still frames the whole model (framing policy unchanged; the fit
+itself changed - see below).
+
+Camera fit note: the viewer now frames models with a projected-extent
+fit (the model fills the view at the default pose; the old bbox-diagonal
+fit left long models small). Orbiting far from the default pose can clip
+extremes - zoom out. Near/far planes track the zoom distance.
+
+Measured on that evidence (`.evidence/dlss-demo-edsr/report.txt`): the
+neural result keeps **66%** of the live render's fine detail where the
+classical sharp stretch keeps 14% and the plain stretch 6% (detail
+energy = the Laplacian of the luminance in the pre-declared centre crop,
+normalised to the live render). The accuracy scores favour the classical
+views (SSIM 0.9792 sharp vs 0.9658 neural): blurring scores well against
+a smooth reference - both numbers are reported rather than the flattering
+one, and the zoom strip in `composite.png` shows what they mean. (Runs
+drift by a few points with the slowly orbiting camera; each run's
+`report.txt` is its own record.)
 
 The synthetic network path remains available (the mode-off fallback,
 `dlss5_nr_set_demo_transform(handle, 0)`): same-extent frames, temporally
@@ -109,10 +138,16 @@ synthetic path sequences temporally across frames. Nothing changes when
 the seam is idle.
 
 `--dlss-demo outdir` drives the same path unattended: it screenshots the
-live view (`live.png`), the in-flight frame (`processing.png`) and the
-presented result (`processed.png` = Lanczos3 and `baseline.png` = bilinear, one frame
-apart so the swap is actually presented), writes `report.txt`
-(label, geometry, measured latency, counter, arena high-water) and closes.
+live view (`live.png`), the in-flight frame (`processing.png`) and one
+file per view (`processed.png` = neural, `baseline.png` = plain stretch,
+`lanczos3.png` = classical sharp), assembles `composite.png` - the four
+self-labelled views in a 2x2 grid plus a strip of **2x-zoomed crops of
+the centre quarter of the frame** (a fixed, pre-declared region, nested
+inside the larger central-50% crop the quality numbers measure; this
+strip is where the difference is visible to a human eye: the zoomed
+neural-vs-plain pixel difference is ~8% of bytes vs ~2% full-frame) - writes a
+plain-language `report.txt` (subject, what the numbers mean, the
+detail-kept/sharpness/accuracy table with a computed verdict) and closes.
 Env: `CENTRESTAGE_DLSS_LIB` (explicit library path), `CENTRESTAGE_WINDOW_POS`
 ("x,y" window placement — honoured on X11/XWayland; the unattended runs
 park the window on the secondary display).
@@ -129,9 +164,12 @@ teardown was deferred), the app keeps painting, completes the frame and
 exits 0 (the exit code is checked);
 **C** — the worker-fault path (`CENTRESTAGE_DLSS_FAULT=throw-once` makes the
 first evaluation fault on the worker; the fault is handled without crashing
-the app and a retry from Failed recovers). Latest full run: 18/19 checks
-pass — the one failure is the documented mouse gap below (evidence in
-`.evidence/seam-risks-v3/`).
+the app and a retry from Failed recovers). Latest full run (v7d, the
+final comprehensibility binary): **26/27** - A 6/7 (the mouse gap below
+only), B 6/6, C 6/6, D 8/8 (evidence: `.evidence/seam-risks-v7d/` and
+`.evidence/seam-risks-v7d-D/`; D's assertions track the plain-words view
+names and the suite defaults to the demo subject
+`Teen_Kitty_rigged.glb`, `CENTRESTAGE_RISK_MODEL` overrides).
 
 **Input-injection reality (documented, not overclaimed):** the unattended
 input layer (ydotoold uinput) is STOCHASTIC on this session - events are
@@ -143,13 +181,13 @@ input" failed first) while B/C/D passed):
 
 | path                                   | green evidence |
 |----------------------------------------|----------------|
-| F9 Trigger + worker/presenter          | v3, v5, v6     |
-| mid-flight close/Esc gating (deferral) | v3, v5         |
-| worker-fault handling + retry          | v3, v5, v6     |
-| F10 A/B toggle (the visible demo)      | v4, v6, v7     |
+| F9 Trigger + worker/presenter          | v3, v5, v6, v7d |
+| mid-flight close/Esc gating (deferral) | v3, v5, v7d    |
+| worker-fault handling + retry          | v3, v5, v6, v7d |
+| F10 A/B toggle (the visible demo)      | v4, v6, v7, v7d |
 | camera-drag Release (mouse wiring)     | v6             |
-| clean exit (rc 0)                      | v3, v4, v5, v6 |
-| F12 screenshot + non-blank content     | v3-v6          |
+| clean exit (rc 0)                      | v3-v7d         |
+| F12 screenshot + non-blank content     | v3-v7d         |
 
 The camera-drag path (previously a documented manual gap) PASSED with
 real injected input in v6 - the earlier failures were injection flake,

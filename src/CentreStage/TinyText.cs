@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Michael Lamothe
+//
+// Minimal 5x7 bitmap font for the demo composite's zoom-strip labels. The
+// evidence must explain itself in-image (a first-time viewer reads it
+// without the docs), so the composite cannot rely on filenames alone. Only
+// the characters the labels need are defined; anything else draws as a box.
+
+namespace CentreStage;
+
+internal static class TinyText
+{
+    // 7 rows per glyph, 5 bits per row (bit 4 = leftmost pixel).
+    private static readonly Dictionary<char, byte[]> Glyphs = new()
+    {
+        [' '] = new byte[] { 0, 0, 0, 0, 0, 0, 0 },
+        ['-'] = new byte[] { 0, 0, 0, 0x0F, 0, 0, 0 },
+        ['.'] = new byte[] { 0, 0, 0, 0, 0, 0x06, 0x06 },
+        [':'] = new byte[] { 0, 0x06, 0x06, 0, 0x06, 0x06, 0 },
+        ['/'] = new byte[] { 0x01, 0x02, 0x04, 0x04, 0x08, 0x10, 0x10 },
+        ['0'] = new byte[] { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E },
+        ['1'] = new byte[] { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E },
+        ['2'] = new byte[] { 0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F },
+        ['3'] = new byte[] { 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E },
+        ['4'] = new byte[] { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 },
+        ['5'] = new byte[] { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E },
+        ['6'] = new byte[] { 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E },
+        ['7'] = new byte[] { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 },
+        ['8'] = new byte[] { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E },
+        ['9'] = new byte[] { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C },
+        ['A'] = new byte[] { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 },
+        ['B'] = new byte[] { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E },
+        ['C'] = new byte[] { 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E },
+        ['D'] = new byte[] { 0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E },
+        ['E'] = new byte[] { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F },
+        ['F'] = new byte[] { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 },
+        ['G'] = new byte[] { 0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F },
+        ['H'] = new byte[] { 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 },
+        ['I'] = new byte[] { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F },
+        ['J'] = new byte[] { 0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C },
+        ['K'] = new byte[] { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 },
+        ['L'] = new byte[] { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F },
+        ['M'] = new byte[] { 0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11 },
+        ['N'] = new byte[] { 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 },
+        ['O'] = new byte[] { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E },
+        ['P'] = new byte[] { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 },
+        ['Q'] = new byte[] { 0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D },
+        ['R'] = new byte[] { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 },
+        ['S'] = new byte[] { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E },
+        ['T'] = new byte[] { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 },
+        ['U'] = new byte[] { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E },
+        ['V'] = new byte[] { 0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04 },
+        ['W'] = new byte[] { 0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11 },
+        ['X'] = new byte[] { 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 },
+        ['Y'] = new byte[] { 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04 },
+        ['Z'] = new byte[] { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F },
+    };
+
+    private static readonly byte[] Missing = new byte[] { 0x1F, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1F };
+
+    /// <summary>
+    /// Draws white text with a dark shadow (readable over any content) into
+    /// a top-down RGBA buffer. Scale 2 = 10x14 pixels per glyph.
+    /// </summary>
+    public static void Draw(byte[] rgba, int width, int height, int x, int y,
+        string text, int scale = 2)
+    {
+        var cx = x;
+        foreach (var raw in text.ToUpperInvariant())
+        {
+            var glyph = Glyphs.TryGetValue(raw, out var g) ? g : Missing;
+            for (var row = 0; row < 7; ++row)
+            {
+                for (var col = 0; col < 5; ++col)
+                {
+                    if ((glyph[row] & (1 << (4 - col))) == 0)
+                    {
+                        continue;
+                    }
+                    for (var sy = 0; sy < scale; ++sy)
+                    {
+                        for (var sx = 0; sx < scale; ++sx)
+                        {
+                            Set(rgba, width, height,
+                                cx + col * scale + sx, y + row * scale + sy,
+                                20, 20, 24); // the shadow first
+                            Set(rgba, width, height,
+                                cx + col * scale + sx - scale, y + row * scale + sy - scale,
+                                245, 245, 240);
+                        }
+                    }
+                }
+            }
+            cx += 6 * scale;
+        }
+    }
+
+    private static void Set(byte[] rgba, int width, int height, int x, int y,
+        byte r, byte g, byte b)
+    {
+        if (x < 0 || y < 0 || x >= width || y >= height)
+        {
+            return;
+        }
+        var i = (y * width + x) * 4;
+        rgba[i] = r;
+        rgba[i + 1] = g;
+        rgba[i + 2] = b;
+        rgba[i + 3] = 255;
+    }
+}

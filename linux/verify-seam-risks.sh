@@ -46,7 +46,9 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MODEL="${CENTRESTAGE_RISK_MODEL:-/home/michael/Projects/ComfyUI/output/3d/pixal3d_flux_krea_00004_00001.glb}"
+# The demo subject (the earlier pixel-girl assets were deleted; the suite
+# now uses Michael's chosen test asset, same as the evidence runs).
+MODEL="${CENTRESTAGE_RISK_MODEL:-/home/michael/Projects/UniRig/work/Teen_Kitty/Teen_Kitty_rigged.glb}"
 OUT="${1:-$ROOT/.evidence/seam-risks-$(date +%H%M%S)}"
 ONLY="${CENTRESTAGE_RISK_ONLY:-all}"
 YD="$ROOT/.tools/ydotoolroot/usr/bin"
@@ -361,14 +363,14 @@ run_D() {
         wait_log "$DLOG" "dlss: frame 1 processed" 90
     re_focus
     send_key 68                                    # F10 -> the A/B swap
-    check "D: F10 swapped the presented view to the bilinear baseline" \
-        wait_log "$DLOG" "F10 -> view: bilinear baseline" 12
+    check "D: F10 swapped the presented view to the plain stretch baseline" \
+        wait_log "$DLOG" "F10 -> plain stretch baseline" 12
     check "D: the swapped view was screenshot (F12 key path)" f12_shoot "$DLOG"
     check "D: the swapped capture has real content (non-blank)" shot_has_content "$DLOG"
     re_focus
     send_key 68                                    # F10 -> back
-    check "D: F10 swapped back to the Lanczos3 demonstration" \
-        wait_log "$DLOG" "F10 -> view: Lanczos3" 12
+    check "D: F10 swapped back to the classical sharp stretch" \
+        wait_log "$DLOG" "F10 -> classical sharp stretch" 12
     check "D: clean exit after Escape" close_app "$DLOG"
 }
 

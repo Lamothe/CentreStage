@@ -48,6 +48,13 @@ internal sealed class DlssSeam : IDisposable
     private (string Name, byte[] Buf)[]? _pinnedViews;
     private int _pinnedView;
     private bool _abMissing;
+
+    // The demo's captured screenshots (kept so the composite can be built
+    // from the very pixels the evidence files contain).
+    private readonly Dictionary<string, byte[]> _demoShots = new();
+
+    /// <summary>The model shown (named in the demo report).</summary>
+    public string AssetName { get; set; } = "(unnamed asset)";
     private byte[]? _reference;
     private int _demoViewIndex;
     private int _captureW = DlssStage.LowWidth;
@@ -68,11 +75,41 @@ internal sealed class DlssSeam : IDisposable
             var next = _pinnedViews[(i + 1) % _pinnedViews.Length].Name;
             string Pretty(string name) => name switch
             {
-                "neural" => "neural demonstration",
-                "bilinear" => "bilinear baseline",
-                _ => "Lanczos3 demonstration",
+                "neural" => "neural upscaler result",
+                "bilinear" => "plain stretch baseline",
+                "synthetic" => "synthetic pipeline result",
+                _ => "classical sharp stretch",
             };
-            return $"view: {Pretty(_pinnedViews[i].Name)} (F10: {next})";
+            return $"{Pretty(_pinnedViews[i].Name)} (F10: {Pretty(next)})";
+        }
+    }
+
+    /// <summary>What the presented view IS, in plain words (the HUD).</summary>
+    public string PlainDescription
+    {
+        get
+        {
+            if (_pinnedViews is null || _pinnedViews.Length == 0)
+            {
+                return "";
+            }
+            var name = _pinnedViews[Math.Clamp(_pinnedView, 0, _pinnedViews.Length - 1)].Name;
+            var geo = $"{_captureW}x{_captureH}";
+            var scale = _pipeline?.DemoScale ?? 0;
+            var captured = scale == 2
+                ? $"the scene was captured at half resolution ({geo})"
+                : $"the scene was captured at low resolution ({geo})";
+            var enlarge = scale > 0 ? $"enlarged {scale}x" : "processed";
+            return name switch
+            {
+                "neural" => $"{captured} and {enlarge} by a learned model "
+                    + "(real open weights)",
+                "bilinear" => $"the same capture ({geo}), {enlarge} by simple "
+                    + "stretching - the softest result",
+                "synthetic" => $"the same capture ({geo}) through the synthetic "
+                    + "pipeline (synthetic weights - arbitrary transform)",
+                _ => $"the same capture ({geo}), {enlarge} by a fixed sharpness formula",
+            };
         }
     }
 
@@ -308,8 +345,9 @@ internal sealed class DlssSeam : IDisposable
                 // With the real weights loaded the primary is the neural
                 // demonstration and the alternates are the two classical
                 // scalers; without it the primary is Lanczos3.
-                string NameFor(int kernel) => kernel == 3
-                    ? "neural"
+                string NameFor(int kernel) => (_pipeline?.DemoScale ?? 0) == 0
+                    ? "synthetic"
+                    : kernel == 3 ? "neural"
                     : kernel == 2 ? "bilinear" : "Lanczos3";
                 var views = new List<(string Name, byte[] Buf)>
                 {
@@ -423,23 +461,39 @@ internal sealed class DlssSeam : IDisposable
         if (_state == State.Processing)
         {
             overlay.DrawHud(frameBufferWidth, frameBufferHeight,
-                $"DLSS: processing {_captureW}x{_captureH} frame {_processed + 1} "
-                + $"({_evaluateClock.Elapsed.TotalSeconds:F1} s so far) - frame-by-frame, not real-time",
+                (_pipeline?.DemoScale == 2
+                    ? $"view captured at half resolution ({_captureW}x{_captureH})"
+                    : $"view captured at low resolution ({_captureW}x{_captureH})")
+                + $" - enlarging it now ({_evaluateClock.Elapsed.TotalSeconds:F1} s so far; "
+                + "frame-by-frame, not real-time)",
                 17f, new Vector4(0.95f, 0.85f, 0.55f, 0.95f));
         }
         else if (_state == State.Presenting)
         {
             overlay.DrawStatus(frameBufferWidth, frameBufferHeight, Label,
-                $"{_captureW}x{_captureH} -> {_pipeline?.OutputWidth}x{_pipeline?.OutputHeight} "
-                + $"processed in {_lastSeconds:F2} s - {ViewName} - "
-                + $"frame-by-frame, not real-time ({_processed} done; "
-                + "camera or F9: live view)",
+                $"{ViewName} - {PlainDescription} | enlarged to "
+                + $"{_pipeline?.OutputWidth}x{_pipeline?.OutputHeight}, processed in "
+                + $"{_lastSeconds:F1} s (frame-by-frame, not real-time) | "
+                + "F9 or camera movement: back to the live view",
                 -1f, elapsed);
         }
         else if (_state == State.Failed)
         {
             overlay.DrawHud(frameBufferWidth, frameBufferHeight,
                 $"DLSS seam failed: {_failure}", 17f, new Vector4(0.95f, 0.45f, 0.45f, 0.95f));
+        }
+        else if (_pipeline is not null)
+        {
+            // The live view: say what the experiment is before it runs.
+            var hint = _pipeline.DemoScale == 0
+                ? "live render at full resolution - press F9 to process one frame "
+                  + "through the synthetic pipeline (synthetic weights - arbitrary transform)"
+                : "live render at full resolution (the detail the experiment preserves) - "
+                  + "press F9 to capture at "
+                  + (_pipeline.DemoScale == 2 ? "half" : "low")
+                  + " resolution and enlarge it two ways (F10 swaps the comparison view)";
+            overlay.DrawHud(frameBufferWidth, frameBufferHeight, hint,
+                17f, new Vector4(0.80f, 0.85f, 0.93f, 0.92f));
         }
 
         if (_demoDir is null)
@@ -475,7 +529,10 @@ internal sealed class DlssSeam : IDisposable
                 else if (_state == State.Presenting)
                 {
                     // Completed within one frame (not expected, but safe).
-                    SavePng(Path.Combine(_demoDir, "processed.png"), frameBufferWidth,
+                    // Name the file for the view actually shown (a no-model
+                    // run's primary is not the neural view).
+                    SavePng(Path.Combine(_demoDir, DemoFileFor(
+                            _pinnedViews?[0].Name ?? "Lanczos3")), frameBufferWidth,
                         frameBufferHeight);
                     WriteReport(_demoDir, frameBufferWidth, frameBufferHeight);
                     _demoStage = 4;
@@ -491,13 +548,7 @@ internal sealed class DlssSeam : IDisposable
             case 3:
                 if (_state == State.Presenting)
                 {
-                    string PrimaryFile(string name) => name switch
-                    {
-                        "neural" => "processed.png",
-                        "bilinear" => "baseline.png",
-                        _ => "lanczos3.png",
-                    };
-                    SavePng(Path.Combine(_demoDir, PrimaryFile(
+                    SavePng(Path.Combine(_demoDir, DemoFileFor(
                             _pinnedViews![0].Name)), frameBufferWidth,
                         frameBufferHeight);
                     if (_pinnedViews is null || _pinnedViews.Length < 2)
@@ -567,10 +618,6 @@ internal sealed class DlssSeam : IDisposable
         var quality = new System.Text.StringBuilder();
         if (_reference is not null && _pinnedViews is not null)
         {
-            var names = _pinnedViews.Select(v => v.Name == "neural"
-                    ? $"neural ({Dlss5Pipeline.LoadedModelName})"
-                    : v.Name == "bilinear" ? "bilinear baseline" : "Lanczos3")
-                .ToArray();
             var w = _pipeline!.OutputWidth;
             var h = _pipeline.OutputHeight;
             // The pre-declared centre crop (the central 50%): the region
@@ -582,31 +629,168 @@ internal sealed class DlssSeam : IDisposable
             var cx1 = w - w / 4;
             var cy1 = h - h / 4;
             var refDetail = DetailEnergy(_reference, w, h, cx0, cy0, cx1, cy1);
-            quality.AppendLine(
-                $"  ground-truth detail energy (centre crop): {refDetail:F1}");
-            for (var i = 0; i < _pinnedViews.Length && i < names.Length; ++i)
+
+            string Plain(string name) => name switch
+            {
+                "neural" => $"neural upscaler ({Dlss5Pipeline.LoadedModelName})",
+                "bilinear" => "plain stretch baseline",
+                "synthetic" => "synthetic pipeline",
+                _ => "classical sharp stretch",
+            };
+            // A near-flat reference carries no detail to "keep"; such rows
+            // report n/a rather than an unbounded percentage.
+            var detailMeaningful = refDetail >= 1.0;
+            var rows = new List<(string View, double DetailPct, double Psnr,
+                double Ssim)>();
+            for (var i = 0; i < _pinnedViews.Length; ++i)
             {
                 var (psnr, ssim) = QualityVs(_reference, _pinnedViews[i].Buf,
                     w, h);
-                var (cpsnr, cssim) = QualityVs(_reference, _pinnedViews[i].Buf,
-                    w, h, cx0, cy0, cx1, cy1);
                 var detail = DetailEnergy(_pinnedViews[i].Buf, w, h, cx0, cy0,
                     cx1, cy1);
-                quality.AppendLine(
-                    $"  view {names[i]}: full frame PSNR {psnr:F2} dB, " +
-                    $"SSIM {ssim:F4}; centre crop PSNR {cpsnr:F2} dB, " +
-                    $"SSIM {cssim:F4}; detail energy {detail:F1}");
+                rows.Add((Plain(_pinnedViews[i].Name),
+                    detailMeaningful ? 100.0 * detail / refDetail : 0.0,
+                    psnr, ssim));
             }
+
+            quality.AppendLine($"  subject: {AssetName} (the scene in the screenshots)");
             quality.AppendLine(
-                "  ground truth: the scene rendered at the presented size " +
-                "(real content, the demo's actual capture). Detail energy " +
-                "= mean squared Laplacian of the luminance x1000 in the " +
-                "centre crop (how much fine structure each view carries).");
+                "  what the numbers mean: every view below was made from ONE");
+            quality.AppendLine(
+                $"  capture of this scene at low resolution ({_captureW}x{_captureH}), then");
+            quality.AppendLine(
+                $"  enlarged {_pipeline.DemoScale}x (the live render above is the reference).");
+            quality.AppendLine(
+                "  \"detail kept\" is how much of the fine structure (hair,");
+            quality.AppendLine(
+                "  edges, texture) survives the enlargement - 100% = what the");
+            quality.AppendLine(
+                "  full-resolution live render has. \"sharpness\" and");
+            quality.AppendLine(
+                "  \"accuracy\" are standard scores against that live render");
+            quality.AppendLine(
+                "  (higher = closer).");
+            quality.AppendLine();
+            quality.AppendLine("  view                      detail kept   sharpness   accuracy");
+            foreach (var (view, pct, psnr, ssim) in rows)
+            {
+                quality.AppendLine(detailMeaningful
+                    ? $"  {view,-25} {pct,9:F0}%   {psnr,8:F2} dB   {ssim,8:F4}"
+                    : $"  {view,-25} {"n/a",9}   {psnr,8:F2} dB   {ssim,8:F4}");
+            }
+            if (detailMeaningful && rows.Exists(r => r.DetailPct > 100.0))
+            {
+                quality.AppendLine(
+                    "  (over 100% detail kept = more fine grain than the live");
+                quality.AppendLine(
+                    "  render - typically ringing or sharpening artefacts.)");
+            }
+            quality.AppendLine();
+
+            // The plain-words verdict, computed from the actual rows: no
+            // sentence here may assert anything the table above contradicts.
+            var neural = rows.FindAll(r => r.View.StartsWith("neural"));
+            var classical = rows.FindAll(r => !r.View.StartsWith("neural"));
+            if (neural.Count > 0 && classical.Count > 0 && detailMeaningful)
+            {
+                var bestNeural = neural.OrderByDescending(r => r.DetailPct).First();
+                var bestClassical = classical.OrderByDescending(r => r.DetailPct).First();
+                if (bestNeural.DetailPct > bestClassical.DetailPct + 5)
+                {
+                    quality.AppendLine(
+                        $"  In plain words: the neural result keeps {bestNeural.DetailPct:F0}% of the");
+                    quality.AppendLine(
+                        $"  fine detail where the {bestClassical.View} keeps {bestClassical.DetailPct:F0}% -");
+                    quality.AppendLine(
+                        "  that is the visible difference in the zoom strip of");
+                    quality.AppendLine(
+                        "  composite.png. The accuracy scores:");
+                    if (bestNeural.Ssim < bestClassical.Ssim)
+                    {
+                        var bestSharp = classical.OrderByDescending(r => r.Ssim).First();
+                        quality.AppendLine(
+                            $"  favour the {bestSharp.View} ({bestSharp.Ssim:F4} vs {bestNeural.Ssim:F4}):");
+                        quality.AppendLine(
+                            "  blurring scores well against a smooth reference, so BOTH");
+                        quality.AppendLine(
+                            "  results are reported rather than picking the flattering one.");
+                    }
+                    else
+                    {
+                        quality.AppendLine(
+                            $"  also favour the neural result ({bestNeural.Ssim:F4} vs {bestClassical.Ssim:F4})");
+                        quality.AppendLine(
+                            "  on this capture - both the detail and the scores agree here.");
+                    }
+                }
+                else
+                {
+                    quality.AppendLine(
+                        "  In plain words: on this capture the neural result did NOT");
+                    quality.AppendLine(
+                        "  keep visibly more detail than the classical views - the");
+                    quality.AppendLine(
+                        "  visible-detail claim is downgraded accordingly; the");
+                    quality.AppendLine(
+                        "  screenshots are the evidence either way.");
+                }
+            }
+            else if (!detailMeaningful)
+            {
+                quality.AppendLine(
+                    "  In plain words: this scene is too smooth to measure detail");
+                quality.AppendLine(
+                    "  recovery on; no detail claim is made from this run.");
+            }
+            quality.AppendLine();
+            quality.AppendLine(
+                "  technical record (for the measurement itself): detail energy");
+            quality.AppendLine(
+                "  = mean squared Laplacian of the luminance x1000 in the centre");
+            quality.AppendLine(
+                $"  crop; the ground truth carries {refDetail:F1}. The scores are");
+            quality.AppendLine(
+                "  computed on the full RGB frame.");
         }
         else
         {
             quality.AppendLine("  (no ground-truth capture available)");
         }
+        var fileView = new Dictionary<string, string>();
+        if (_pinnedViews is not null)
+        {
+            foreach (var v in _pinnedViews)
+            {
+                fileView[DemoFileFor(v.Name)] = PrettyView(v.Name);
+            }
+        }
+        var legend = new System.Text.StringBuilder();
+        legend.AppendLine("  the screenshots (all from ONE capture of one view):");
+        legend.AppendLine("  live.png ........ top-left of composite.png: the "
+            + "full-resolution live render");
+        var positions = new Dictionary<string, string>
+        {
+            ["processed.png"] = "top-right",
+            ["baseline.png"] = "bottom-left",
+            ["lanczos3.png"] = "bottom-right",
+            ["synthetic.png"] = "bottom-right",
+        };
+        foreach (var (file, pos) in positions)
+        {
+            if (fileView.TryGetValue(file, out var view))
+            {
+                legend.AppendLine($"  {file,-17} {pos}: {view} (the same capture, "
+                    + (_demoShots.ContainsKey(file) ? "re-processed)" : "NOT CAPTURED in this run)"));
+            }
+        }
+        legend.AppendLine("  processing.png .. the in-flight state (the latency is "
+            + "visible in the text)");
+        legend.AppendLine("  composite.png ... the views side by side (top: 2x2 "
+            + "self-labelled full views; bottom: 2x-zoomed crops of the CENTRE "
+            + "QUARTER of the frame - a fixed, pre-declared region inside the "
+            + "larger centre crop the quality numbers measure; this strip is "
+            + "where the upscaling difference is visible to the eye)");
+
         var labels = ViewLabels;
         var labelBlock = new System.Text.StringBuilder();
         foreach (var l in labels)
@@ -631,14 +815,14 @@ internal sealed class DlssSeam : IDisposable
             {quality.ToString().TrimEnd()}
             per-view labels:
             {labelBlock.ToString().TrimEnd()}
-            evidence: live.png (live view), processing.png (in-flight, latency visible),
-                      one file per view: {string.Join(" + ", _pinnedViews?.Select(v => v.Name == "neural" ? "processed.png" : v.Name == "bilinear" ? "baseline.png" : "lanczos3.png") ?? Array.Empty<string>())}
+            {legend}
             NOT DLSS5 in any case: this seam proves the pipeline end to end,
             never vendor parity. Frame-by-frame processing with visible latency,
             not real-time (the neural view is seconds per frame on CPU - see
             the evaluate line above).
             """;
         File.WriteAllText(Path.Combine(demoDir, "report.txt"), report);
+        BuildComposite(width, height);
         Console.WriteLine(report);
     }
 
@@ -764,13 +948,119 @@ internal sealed class DlssSeam : IDisposable
         // down the render loop mid-demo.
         try
         {
-            Screenshot.SavePng(_gl, path, width, height);
+            var rgba = Screenshot.CaptureRgba(_gl, width, height);
+            Screenshot.WriteRgbaPng(path, rgba, width, height);
+            _demoShots[Path.GetFileName(path)] = rgba;
             Console.WriteLine($"  dlss demo: captured {width}x{height} -> {path}");
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"error: screenshot '{path}' failed: {ex.Message}");
             Environment.ExitCode = 3;
+        }
+    }
+
+    private static string DemoFileFor(string name) => name switch
+    {
+        "neural" => "processed.png",
+        "bilinear" => "baseline.png",
+        "synthetic" => "synthetic.png",
+        _ => "lanczos3.png",
+    };
+
+    private static string PrettyView(string name) => name switch
+    {
+        "neural" => "neural upscaler result",
+        "bilinear" => "plain stretch baseline",
+        "synthetic" => "synthetic pipeline result",
+        _ => "classical sharp stretch",
+    };
+
+    /// <summary>
+    /// The side-by-side evidence: a 2x2 grid of the captured screenshots.
+    /// Each panel is the full window WITH its in-band HUD label, so the
+    /// composite labels itself. Missing views leave dark slots.
+    /// </summary>
+    private void BuildComposite(int width, int height)
+    {
+        if (_demoDir is null)
+        {
+            return;
+        }
+        var slots = new[] { "live.png", "processed.png", "baseline.png", "lanczos3.png" };
+        // Layout: the four self-labelled full views in a 2x2 grid, then a
+        // strip of 2x-zoomed crops of the pre-declared centre region (the
+        // region the quality numbers measure - not cherry-picked), one per
+        // view, each labelled in-image. The zoom strip is where the
+        // difference is visible to a human eye.
+        var fileView = new Dictionary<string, string>();
+        if (_pinnedViews is not null)
+        {
+            foreach (var v in _pinnedViews)
+            {
+                fileView[DemoFileFor(v.Name)] = PrettyView(v.Name);
+            }
+        }
+        string ZoomLabel(int s) => s == 0
+            ? "2x ZOOM - LIVE RENDER"
+            : _demoShots.ContainsKey(slots[s]) && fileView.TryGetValue(slots[s], out var v)
+                ? $"2x ZOOM - {v}"
+                : $"2x ZOOM - {slots[s]} NOT CAPTURED";
+        var cw = width * 2;
+        var ch = height * 2 + height / 2; // 2x2 grid + one 400px zoom strip
+        var composite = new byte[cw * ch * 4];
+        for (var s = 0; s < slots.Length; ++s)
+        {
+            if (!_demoShots.TryGetValue(slots[s], out var panel)
+                || panel.Length != width * height * 4)
+            {
+                continue;
+            }
+            var ox = (s % 2) * width;
+            var oy = (s / 2) * height;
+            for (var y = 0; y < height; ++y)
+            {
+                Array.Copy(panel, y * width * 4,
+                    composite, ((oy + y) * cw + ox) * 4, width * 4);
+            }
+
+            // The zoom crop: the CENTRE QUARTER of the view (320x200 at
+            // the default window) - a fixed, pre-declared region, nested
+            // inside the larger central-50% crop the quality numbers
+            // measure - enlarged 2x into a 640x400 panel with nearest
+            // sampling, so the crop shows the actual pixels each upscaler
+            // produced (no new smoothing in the evidence itself).
+            var zw = width / 4;
+            var zh = height / 4;
+            var zx0 = width / 2 - zw / 2;
+            var zy0 = height / 2 - zh / 2;
+            var zox = s * (width / 2);
+            for (var y = 0; y < zh * 2; ++y)
+            {
+                var sy = zy0 + y / 2;
+                for (var x = 0; x < zw * 2; ++x)
+                {
+                    var sx = zx0 + x / 2;
+                    var srcIdx = (sy * width + sx) * 4;
+                    var dstIdx = ((height * 2 + y) * cw + zox + x) * 4;
+                    composite[dstIdx] = panel[srcIdx];
+                    composite[dstIdx + 1] = panel[srcIdx + 1];
+                    composite[dstIdx + 2] = panel[srcIdx + 2];
+                    composite[dstIdx + 3] = 255;
+                }
+            }
+            TinyText.Draw(composite, cw, ch, zox + 8, height * 2 + 8, ZoomLabel(s));
+        }
+        try
+        {
+            Screenshot.WriteRgbaPng(Path.Combine(_demoDir, "composite.png"),
+                composite, cw, ch);
+            Console.WriteLine(
+                $"  dlss demo: composite {cw}x{ch} -> composite.png");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"error: composite failed: {ex.Message}");
         }
     }
 

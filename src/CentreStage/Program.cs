@@ -263,6 +263,7 @@ internal static class Program
             gl = window.CreateOpenGL();
             var decoded = Renderer.DecodeTextures(model.Textures);
             renderer = new Renderer(gl, model, decoded, animate);
+            camera.SetFrameAspect(1280f / 800f);
             camera.FrameBounds(renderer.Bounds.min, renderer.Bounds.max);
             Console.WriteLine($"  bounds: ({renderer.Bounds.min:F2}) .. ({renderer.Bounds.max:F2})");
             Console.WriteLine($"  camera: pos=({camera.Position:F2}) dist={camera.Distance:F2}");
@@ -522,7 +523,7 @@ internal static class Program
                     Console.WriteLine($"dlss: no demonstration model at {modelPath} " +
                         "(run vr/fetch-demo-model.sh); the classical scaler is used");
                 }
-                dlss = new DlssSeam(gl, dlssDemoDir);
+                dlss = new DlssSeam(gl, dlssDemoDir) { AssetName = Path.GetFileName(path) };
             }
             catch (Exception ex)
             {
@@ -634,7 +635,20 @@ internal static class Program
                 {
                     renderer = new Renderer(gl, loaded, animate: animate);
                     playback = animate ? new AnimationPlayback(loaded) : null;
-                    camera.FrameBounds(renderer.Bounds.min, renderer.Bounds.max);
+                    camera.SetFrameAspect((float)width / MathF.Max(height, 1));
+                    var (bMin, bMax) = renderer.Bounds;
+                    if (dlssDemoDir is not null)
+                    {
+                        // The demo's documented detail framing: the top
+                        // 35% of the model's height (for a character the
+                        // face/hair; the region where upscaling differences
+                        // are visible to a human eye). The normal app view
+                        // still frames the whole model.
+                        bMin.Y = bMax.Y - (bMax.Y - bMin.Y) * 0.35f;
+                        Console.WriteLine(
+                            $"  dlss demo: detail framing (top 35% of the model)");
+                    }
+                    camera.FrameBounds(bMin, bMax);
                     window.Title = $"Centre Stage — {Path.GetFileName(path)}";
                 }
 

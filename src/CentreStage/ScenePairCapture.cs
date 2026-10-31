@@ -159,8 +159,20 @@ internal static class ScenePairCapture
             var stem = $"{g.Split}-{frame.index:D3}";
             var cheapName = $"{stem}-cheap.ppm";
             var fullName = $"{stem}-full.ppm";
-            var cheapFrame = DrawAndSave(cheap, cheapName);
-            var fullFrame = DrawAndSave(full, fullName);
+            // Alternate the timed draw order so neither renderer systematically
+            // absorbs driver warm-up; renders are order-independent (static pose).
+            (string Hash, byte[] Rgb, double DrawMs) cheapFrame;
+            (string Hash, byte[] Rgb, double DrawMs) fullFrame;
+            if (next % 2 == 0)
+            {
+                cheapFrame = DrawAndSave(cheap, cheapName);
+                fullFrame = DrawAndSave(full, fullName);
+            }
+            else
+            {
+                fullFrame = DrawAndSave(full, fullName);
+                cheapFrame = DrawAndSave(cheap, cheapName);
+            }
             var (maxDiff, meanDiff) = Diff(cheapFrame.Rgb, fullFrame.Rgb);
             // A bit-identical pair means the cheap change had no effect on this
             // asset and the pair is an identity control, not training data.
@@ -255,10 +267,10 @@ internal static class ScenePairCapture
             schema = "centrestage-scene-pairs-v2",
             label = "scene-training pairs for a neural rendering demonstration (not DLSS5)",
             asset, assetSha256 = assetHash,
-            width = Width, height = Height, format = "P6 RGB8 top-down", pose = "bind pose; animation disabled",
+            width = Width, height = Height, format = "P6 RGB8 top-down", pose = "authored rest pose baked; animation disabled",
             renderer = graphics, lightPolicy = "one declared directional light per split; asset lights replaced",
-            cheapPass = "reduced texture/lighting fidelity: base colour sampled at +2.0 mip LOD bias, auxiliary material maps not sampled (factors only), Lambert diffuse + hemispheric ambient + factor-only emissive; GGX specular, clearcoat, sheen, transmission and normal-map perturbation omitted",
-            timingNote = "cheapRenderMs/fullRenderMs are wall-clock milliseconds around Draw + gl.Finish at this resolution on this driver; noisy, not real-time evidence",
+            cheapPass = "reduced texture/lighting fidelity: base colour sampled at +2.0 mip LOD bias (mip-capable samplers only), auxiliary material maps not sampled (factors only), Lambert diffuse + hemispheric ambient + factor-only emissive; GGX specular, clearcoat, sheen, transmission and normal-map perturbation omitted",
+            timingNote = "cheapRenderMs/fullRenderMs are wall-clock milliseconds around Draw + gl.Finish at this resolution on this driver; the timed draw order alternates per frame; noisy, not real-time evidence",
             differenceNote = "cheapFullMaxAbsDiff/cheapFullMeanAbsDiff compare the two rasters per pair; a bit-identical pair aborts the capture",
             frames = records
         };

@@ -102,9 +102,12 @@ internal static class ShaderSources
     //   lighting fidelity - Lambert diffuse + hemispheric ambient + factor-only
     //                       emissive. The GGX specular lobe, clearcoat, sheen,
     //                       transmission and normal-map perturbation are omitted.
-    // Alpha handling, the unlit path, tone mapping and the sRGB encode match the
-    // full pass so the cheap render stays in the same colour pipeline. Actual
-    // cheap-vs-full cost must be measured per capture, not assumed from this list.
+    // The alpha, unlit, tone-mapping and sRGB code paths are the same as the
+    // full pass, with the documented texture reductions applying inside them,
+    // so the cheap render stays in the same colour pipeline. The mip bias only
+    // bites for mip-capable samplers; a non-mip min filter still loses the
+    // auxiliary maps and lighting lobes. Actual cheap-vs-full cost must be
+    // measured per capture, not assumed from this list.
     public const string CheapFragment = """
         #version 330 core
         in vec3 vWorldPos;

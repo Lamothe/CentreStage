@@ -28,7 +28,8 @@ an unexpected framebuffer size rather than silently scaling.
 
 Predeclared groups: train (8 views), validation (2), locked test (2). Each
 split has its own yaw interval, pitch and directional light/ambient combination;
-all use bind pose, no animation, same asset and per-view framing. Asset lights
+all use the authored rest pose baked with animation disabled, same asset and
+per-view framing. Asset lights
 are replaced by the explicitly specified single directional light. Train, val and
 test TSV files contain relative `cheap.ppm<TAB>full.ppm` paths with no header,
 compatible with `scene-train`. The locked test set must not be used for model
@@ -48,12 +49,16 @@ and not a fabricated perturbation of the full render:
   factor-only emissive. The GGX specular lobe, clearcoat, sheen, transmission
   and normal-map perturbation are omitted.
 
-Alpha handling, the unlit path, tone mapping and the sRGB encode match the full
-pass, so both renders share one colour pipeline. Every capture verifies the
+Alpha handling, the unlit path, tone mapping and the sRGB encode share the full
+pass's code paths, with the documented texture reductions applying inside them,
+so both renders stay in one colour pipeline. The mip bias only bites for
+mip-capable samplers; a non-mip min filter still loses the auxiliary maps and
+lighting lobes. Every capture verifies the
 cheap and full rasters actually differ: a bit-identical pair aborts the run
 (it would be an identity control, not training data). Each frame also records
 `cheapRenderMs`/`fullRenderMs`, wall-clock milliseconds around draw plus
-`gl.Finish` at this resolution on this driver — honest measurements of that run,
+`gl.Finish` at this resolution on this driver, with the timed draw order
+alternating per frame — honest measurements of that run,
 noisy at this scale, not real-time evidence and not a general performance claim.
 
 `metadata.json` records the asset and image SHA-256 hashes,

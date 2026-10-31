@@ -72,11 +72,11 @@ internal sealed unsafe class Renderer : IDisposable
         public uint[]? SortedIndices;
     }
 
-    public Renderer(GL gl, GltfModel model, ImageResult?[]? decodedTextures = null, bool animate = true)
+    public Renderer(GL gl, GltfModel model, ImageResult?[]? decodedTextures = null, bool animate = true, bool cheapScene = false)
     {
         _gl = gl;
         _model = model;
-        _program = BuildProgram();
+        _program = BuildProgram(cheapScene);
         _textureIds = new int[model.Textures.Count];
         Array.Fill(_textureIds, -1);
         _srgbTextures = TextureColorSpace.SrgbTextureIndices(model.Materials);
@@ -139,7 +139,7 @@ internal sealed unsafe class Renderer : IDisposable
 
     public (Vector3 min, Vector3 max) Bounds { get; private set; } = (Vector3.Zero, Vector3.Zero);
 
-    private uint BuildProgram()
+    private uint BuildProgram(bool cheapScene)
     {
         var mode = Environment.GetEnvironmentVariable("CENTRESTAGE_SOLID");
         if (mode is "1" or "2")
@@ -191,7 +191,7 @@ internal sealed unsafe class Renderer : IDisposable
         }
 
         var vs = Compile(ShaderType.VertexShader, ShaderSources.Vertex);
-        var fs = Compile(ShaderType.FragmentShader, ShaderSources.Fragment);
+        var fs = Compile(ShaderType.FragmentShader, cheapScene ? ShaderSources.CheapFragment : ShaderSources.Fragment);
         var program = _gl.CreateProgram();
         _gl.AttachShader(program, vs);
         _gl.AttachShader(program, fs);

@@ -38,6 +38,7 @@ internal sealed class DlssSeam : IDisposable
     private readonly DlssStage _stage;
     private readonly string? _demoDir;
     private Dlss5Pipeline? _pipeline;
+    internal bool IsReady => _pipeline is not null;
     private State _state = State.Idle;
     private string? _failure;
     private readonly Stopwatch _evaluateClock = new();

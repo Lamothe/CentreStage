@@ -91,6 +91,164 @@ internal static class ShaderSources
         }
         """;
 
+    // Scene experiment cheap pass: genuinely reduced texture and lighting fidelity,
+    // compiled separately against the same vertex shader. NOT a post-process blur,
+    // NOT a resolution reduction and NOT a perturbation of the full render:
+    //   texture fidelity  - the base-colour map is sampled with a fixed +2.0 mip LOD
+    //                       bias (a quarter-size linear footprint per fetch, cheaper
+    //                       sampling); all auxiliary material maps (metallic-roughness,
+    //                       normal, occlusion, emissive, specular, clearcoat, sheen,
+    //                       transmission) are not sampled at all, only their factors.
+    //   lighting fidelity - Lambert diffuse + hemispheric ambient + factor-only
+    //                       emissive. The GGX specular lobe, clearcoat, sheen,
+    //                       transmission and normal-map perturbation are omitted.
+    // Alpha handling, the unlit path, tone mapping and the sRGB encode match the
+    // full pass so the cheap render stays in the same colour pipeline. Actual
+    // cheap-vs-full cost must be measured per capture, not assumed from this list.
+    public const string CheapFragment = """
+        #version 330 core
+        in vec3 vWorldPos;
+        in vec3 vNormal;
+        in vec3 vTangent;
+        in vec3 vBitangent;
+        in vec2 vTexCoord0;
+        in vec2 vTexCoord1;
+        in vec4 vColor;
+
+        out vec4 FragColor;
+
+        uniform vec3 uCameraPos;
+        uniform vec3 uSkyColor;
+        uniform vec3 uGroundColor;
+
+        uniform vec4 uBaseColorFactor;
+        uniform float uMetallicFactor;
+        uniform vec3 uEmissiveFactor;
+        uniform float uEmissiveStrength;
+        uniform int uAlphaMode;
+        uniform float uAlphaCutoff;
+        uniform bool uUnlit;
+        uniform bool uSpecularGlossiness;
+
+        uniform sampler2D uBaseColorTex;
+        uniform int uHasBaseColorTex;
+        uniform mat3 uBaseColorUv;
+        uniform int uBaseColorSet;
+
+        uniform int uLightCount;
+        uniform vec3 uLightPos[4];
+        uniform vec3 uLightDir[4];
+        uniform vec3 uLightColor[4];
+        uniform float uLightIntensity[4];
+        uniform float uLightRange[4];
+        uniform float uLightDirectional[4];
+        uniform float uLightSpot[4];
+        uniform float uLightInnerCos[4];
+        uniform float uLightOuterCos[4];
+
+        const float PI = 3.141592653589793;
+
+        vec3 linearToSrgb(vec3 c)
+        {
+            c = max(c, 0.0);
+            vec3 lo = c * 12.92;
+            vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+            return mix(hi, lo, lessThanEqual(c, vec3(0.0031308)));
+        }
+
+        vec2 uvFor(int set, mat3 transform)
+        {
+            return (transform * vec3(set == 1 ? vTexCoord1 : vTexCoord0, 1.0)).xy;
+        }
+
+        void main()
+        {
+            vec2 baseUv = uvFor(uBaseColorSet, uBaseColorUv);
+            vec4 base = uBaseColorFactor * vColor;
+            if (uHasBaseColorTex != 0)
+            {
+                // Fixed +2.0 mip LOD bias: cheaper texture sampling at reduced
+                // texture detail, on the real mip chain.
+                base *= texture(uBaseColorTex, baseUv, 2.0);
+            }
+
+            if (uAlphaMode == 1 && base.a < uAlphaCutoff)
+            {
+                discard;
+            }
+
+            vec3 n = normalize(vNormal);
+            vec3 ambient = mix(uGroundColor, uSkyColor, n.y * 0.5 + 0.5);
+
+            // Factor-only emissive: the emissive map is not sampled.
+            vec3 emissive = uEmissiveFactor * uEmissiveStrength;
+
+            if (uUnlit)
+            {
+                vec3 authored = linearToSrgb(base.rgb + emissive);
+                FragColor = vec4(authored, base.a);
+                return;
+            }
+
+            // Factor-only metallic (no metallic-roughness map); specular-glossiness
+            // materials have no metallic factor, so their diffuse is undimmed.
+            float metallic = uSpecularGlossiness ? 0.0 : clamp(uMetallicFactor, 0.0, 1.0);
+
+            vec3 color = vec3(0.0);
+            for (int i = 0; i < 4; i++)
+            {
+                if (i >= uLightCount)
+                {
+                    break;
+                }
+
+                vec3 l = uLightPos[i] - vWorldPos;
+                float dist = length(l);
+                if (uLightDirectional[i] < 0.5 && uLightRange[i] > 0.0 && dist > uLightRange[i])
+                {
+                    continue;
+                }
+
+                l = uLightDirectional[i] > 0.5 ? normalize(-uLightDir[i]) : l / max(dist, 1e-4);
+
+                float attenuation = 1.0;
+                if (uLightDirectional[i] < 0.5 && uLightRange[i] > 0.0)
+                {
+                    float t = clamp(dist / uLightRange[i], 0.0, 1.0);
+                    attenuation = max(1.0 - t * t * t * t, 0.0) / max(dist * dist, 1e-4);
+                }
+
+                if (uLightSpot[i] > 0.5)
+                {
+                    float cosAngle = dot(-l, normalize(uLightDir[i]));
+                    float cone = clamp(
+                        (cosAngle - uLightOuterCos[i]) / max(uLightInnerCos[i] - uLightOuterCos[i], 1e-4),
+                        0.0, 1.0);
+                    attenuation *= cone * cone;
+                }
+
+                float NoL = max(dot(n, l), 0.0);
+                if (NoL <= 0.0)
+                {
+                    continue;
+                }
+
+                vec3 radiance = uLightColor[i] * uLightIntensity[i] * attenuation;
+                // Lambert diffuse only: the GGX specular, clearcoat and sheen
+                // lobes of the full pass are omitted.
+                color += (1.0 - metallic) * base.rgb / PI * radiance * NoL;
+            }
+
+            color += ambient * base.rgb * (1.0 - metallic * 0.6);
+            color += emissive;
+
+            color = (color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14);
+            color = linearToSrgb(color);
+
+            FragColor = vec4(color, base.a);
+        }
+        """;
+
     public const string Fragment = """
         #version 330 core
         in vec3 vWorldPos;

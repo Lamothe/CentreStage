@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Numerics;
 using CentreStage.Core;
 using Silk.NET.Input;
@@ -14,6 +15,12 @@ internal static class Program
 {
     private static void Main(string[] args)
     {
+        if (args.Contains("--scene-pairs"))
+        {
+            ScenePairCapture.Run(args);
+            return;
+        }
+
         if (args.Length == 0)
         {
             // Desktop launchers pass no arguments: offer a file picker so the app is
@@ -154,6 +161,7 @@ internal static class Program
     {
         Console.WriteLine("usage: CentreStage <model.glb|model.gltf> [--inspect]");
         Console.WriteLine("       CentreStage --inspect <model.glb>");
+        Console.WriteLine("       CentreStage <snapshot.glb> --scene-pairs <new-directory>");
         Console.WriteLine("       CentreStage <model.glb> --capture out.png [--frames N]");
         Console.WriteLine("       CentreStage <model.glb> --dlss-demo outdir   (unattended: live + processed evidence)");
         Console.WriteLine("viewer: F9 processes one frame through the dlss5-linux native host (frame-by-frame,");
@@ -423,6 +431,15 @@ internal static class Program
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var textureQueue = new BlockingCollection<(int Index, ImageResult Image)>(8);
 
+        // Automation control channel (CENTRESTAGE_CTL_FIFO): line commands are
+        // applied on the render thread through the same handlers the input
+        // events call. Seat-level input injection is banned for unattended runs
+        // (it types into whatever window has focus); this channel addresses the
+        // exact app instance. See ControlChannel.
+        var control = Environment.GetEnvironmentVariable("CENTRESTAGE_CTL_FIFO") is { Length: > 0 } ctlFifo
+            ? ControlChannel.Start(ctlFifo)
+            : null;
+
         var loadTask = Task.Run(() =>
         {
             try
@@ -566,6 +583,62 @@ internal static class Program
                 return;
             }
 
+            // Control-channel commands (automation): applied here on the render
+            // thread, through the same handler entry points the input events
+            // call (onScreenshot's capture path, DlssSeam.Trigger/ToggleAB/Release,
+            // OrbitCamera). Each accepted line is echoed as "ctl: <line>".
+            for (var count = 0; count < 8 && control?.TryDequeue(out var command) == true; count++)
+            {
+                if (command is null)
+                {
+                    continue;
+                }
+                Console.WriteLine($"ctl: {command}");
+                var parts = command.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                var ctlDir = Environment.GetEnvironmentVariable("CENTRESTAGE_SHOT_DIR") ?? "shots";
+                if (parts is ["shot"])
+                {
+                    shotPending = Path.Combine(ctlDir, $"shot-{Guid.NewGuid():N}.png");
+                }
+                else if (parts is ["frame"])
+                {
+                    dlss?.Trigger();
+                }
+                else if (parts is ["ab"])
+                {
+                    dlss?.ToggleAB();
+                }
+                else if (parts is ["close"])
+                {
+                    closeRequested = true;
+                }
+                else if (parts is ["orbit", var dxText, var dyText]
+                    && float.TryParse(dxText, NumberStyles.Float, CultureInfo.InvariantCulture, out var dx)
+                    && float.TryParse(dyText, NumberStyles.Float, CultureInfo.InvariantCulture, out var dy) && float.IsFinite(dx) && float.IsFinite(dy) && MathF.Abs(dx) <= 1000 && MathF.Abs(dy) <= 1000)
+                {
+                    // Same units and post-action as the mouse drag handler.
+                    camera.Orbit(dx, dy);
+                    dlss?.Release();
+                }
+                else if (parts is ["pan", var pxText, var pyText]
+                    && float.TryParse(pxText, NumberStyles.Float, CultureInfo.InvariantCulture, out var px)
+                    && float.TryParse(pyText, NumberStyles.Float, CultureInfo.InvariantCulture, out var py) && float.IsFinite(px) && float.IsFinite(py) && MathF.Abs(px) <= 1000 && MathF.Abs(py) <= 1000)
+                {
+                    camera.Pan(px, py);
+                    dlss?.Release();
+                }
+                else if (parts is ["zoom", var zText]
+                    && float.TryParse(zText, NumberStyles.Float, CultureInfo.InvariantCulture, out var z) && float.IsFinite(z) && MathF.Abs(z) <= 1000)
+                {
+                    camera.Zoom(z);
+                    dlss?.Release();
+                }
+                else
+                {
+                    Console.WriteLine($"ctl: unknown command '{command}'");
+                }
+            }
+
             // Test hook: exercise the full open→load→close lifecycle unattended.
             if (int.TryParse(Environment.GetEnvironmentVariable("CENTRESTAGE_AUTO_CLOSE_MS"), out var autoCloseMs)
                 && clock.ElapsedMilliseconds > autoCloseMs)
@@ -581,7 +654,7 @@ internal static class Program
             // and the seam exists).
             synthFrames++;
             if (!synthFired && synthFrames > 30 && stage == LoadStage.Ready
-                && dlss is not null && dlssDemoDir is null)
+                && dlss is { IsReady: true } && dlssDemoDir is null)
             {
                 synthFired = true;
                 if (!string.IsNullOrEmpty(synthClick)
@@ -894,6 +967,10 @@ internal static class Program
         foreach (var keyboard in input.Keyboards)
         {
             var logKeys = Environment.GetEnvironmentVariable("CENTRESTAGE_LOG_KEYS") == "1";
+            if (logKeys)
+            {
+                keyboard.KeyUp += (_, key, code) => Console.WriteLine($"key up: {key} code: {code}");
+            }
             keyboard.KeyDown += (_, key, code) =>
             {
                 if (logKeys)

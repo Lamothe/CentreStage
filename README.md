@@ -190,7 +190,9 @@ park the window on the secondary display).
 ### Seam-risk verification and test hooks
 
 `bash linux/verify-seam-risks.sh [evidence-dir]` verifies the seam's risky
-paths behaviourally with real injected input (ydotool/uinput; `CENTRESTAGE_RISK_ONLY=A|B|C`
+paths behaviourally with real key events delivered to the exact app window
+(`linux/window-key.sh`) and the app's control channel
+(`CENTRESTAGE_CTL_FIFO`; `CENTRESTAGE_RISK_ONLY=A|B|C|D|E`
 runs one scenario): **A** — F9 Trigger wiring, the worker+presenter path and
 Esc close; **B** — the mid-flight close gating: the Esc is sent while a frame
 is evaluating and the app's own "close deferred" line must precede the
@@ -199,11 +201,12 @@ teardown was deferred), the app keeps painting, completes the frame and
 exits 0 (the exit code is checked);
 **C** — the worker-fault path (`CENTRESTAGE_DLSS_FAULT=throw-once` makes the
 first evaluation fault on the worker; the fault is handled without crashing
-the app and a retry from Failed recovers). **E** — the mouse controls:
+the app and a retry from Failed recovers). **D** — the F10 A/B toggle.
+**E** — the mouse controls:
 synthetic clicks (`CENTRESTAGE_SYNTH_CLICK="x,y"`,
 `CENTRESTAGE_SYNTH_MENU="x,y,item"`) drive the same handler entry points
 real mouse events call (the button click and the context-menu pick each
-request a frame and process it; auto-close instead of injected Esc).
+request a frame and process it; auto-close instead of a close key).
 Scenario E run: **8/8** (`.evidence/seam-risks-E3/`). Honest scope: the
 OS pointer delivery is a MANUAL check - both injection layers are broken
 in this session (uinput mouse events never reach the window; xdotool
@@ -219,13 +222,21 @@ Latest full run (v7d, the comprehensibility binary): **26/27** - A 6/7
 defaults to the demo subject `Teen_Kitty_rigged.glb`,
 `CENTRESTAGE_RISK_MODEL` overrides).
 
-**Input-injection reality (documented, not overclaimed):** the unattended
-input layer (ydotoold uinput) is STOCHASTIC on this session - events are
-lost randomly under CPU load and after idle periods, so no single suite
-run is complete. The behaviour matrix is proven across runs
-(`linux/verify-seam-risks.sh`, scenarios A-D; runs v3-v7; run v7's
-scenario A flaked entirely at the injection layer ("the app received
-input" failed first) while B/C/D passed):
+**Input policy (30/10/2026): seat-level injection is BANNED.** The earlier
+suite drove the app with ydotool/uinput — seat-global events that land in
+whatever window happens to have keyboard focus. It typed into the user's
+browser while he was working; that is a hard boundary violation, and the
+layer was stochastic anyway (events lost under CPU load and after idle
+periods, so no single suite run was complete). The suite now uses two
+exact-target mechanisms instead: real key events synthesised directly on
+the app's own X11 window (`linux/window-key.sh <pid> <key> <app-key-log>`: xdotool
+only discovers the window; `linux/window-send-key.c` validates its PID and
+uses XSendEvent directly, never XTEST or focus changes). XSendEvent does not
+require focus; the recipient may still ignore synthetic events. The app's
+control FIFO (`CENTRESTAGE_CTL_FIFO`, see
+`src/CentreStage/ControlChannel.cs`) for screenshots/close/camera driving
+through the same handler entry points the input events call. The behaviour
+matrix below is the historical record of the ydotool-era runs (v3-v7d);
 
 | path                                   | green evidence |
 |----------------------------------------|----------------|
@@ -239,7 +250,7 @@ input" failed first) while B/C/D passed):
 
 The camera-drag path (previously a documented manual gap) PASSED with
 real injected input in v6 - the earlier failures were injection flake,
-not a wiring gap. **Manual fallback recipe** (if the injection flakes):
+not a wiring gap. **Manual fallback recipe** (if the automation flakes):
 run the viewer, press F9, wait for the presented frame to pin, click-drag
 in the window - the status must return to the live view and the console
 must print `dlss: camera input released the presented result`.
@@ -256,11 +267,25 @@ window-close button cannot be deferred (Silk.NET's Closing event is not
 cancellable): pressed while a frame is evaluating, teardown blocks for at
 most the remaining evaluation time (~9 s, bounded; the worker is CPU-only
 and its fault is observed) — Esc/auto-close defer instead and exit 0. Tooling notes for the automation:
-ydotoold 1.0.4 silently dries up after the first key event (the runner gives
-every key a fresh daemon), fast press+release pairs are dropped (the runner
-uses `--key-delay`), xdotool cannot inject into Wayland windows, and the
-session's launch-focus grant is unreliable (the runner clicks the window
-before keys that must land).
+window-exact keys (`linux/window-key.sh`) require X11/XWayland, xdotool
+for discovery, a C compiler and X11 development headers. The helper supports
+F9, F10, F12 and Escape; it refuses ambiguous or mismatched windows. The
+app must run with `CENTRESTAGE_LOG_KEYS=1` and its log passed to the helper;
+press and release are separately acknowledged to prevent duplicate key events.
+X11 clients supply their own PID property, so this is a trusted local desktop
+mechanism, not isolation from malicious X11 clients. Build Release before
+the suite; any supplied evidence directory must be new. The
+suite creates a private per-run directory and mode-0600 FIFO, launches its own
+app directly, and never changes session-wide settings. The optional control
+FIFO must be owned by the current user with mode 0600 and should reside in a
+private directory. Its commands (`shot`, `frame`, `ab`, `close`, `orbit dx dy`,
+`pan dx dy`, `zoom d`) run on the render thread and are echoed as `ctl: <line>`.
+`shot` uses a generated filename in `CENTRESTAGE_SHOT_DIR`; no arbitrary path
+is accepted. The FIFO is a trusted same-user test interface, not a sandbox. For the record, the retired ydotool layer: its
+daemon silently dried up after the first key event, fast press+release
+pairs were dropped, uinput mouse events never reached Wayland windows, and
+the session's launch-focus grant was unreliable — all reasons it was never
+safe to run unattended while the user was at the machine.
 
 ## Extension support
 

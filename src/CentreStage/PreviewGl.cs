@@ -1,4 +1,5 @@
 using System.Numerics;
+using CentreStage.Core;
 using Silk.NET.OpenGL;
 
 namespace CentreStage;
@@ -113,50 +114,14 @@ internal static class PreviewGl
     }
 
     /// <summary>PSNR in dB of an 8-bit RGB buffer against the reference frame.</summary>
-    internal static double Psnr(byte[] candidate, byte[] reference)
-    {
-        if (candidate.Length != reference.Length || candidate.Length % 3 != 0)
-        {
-            throw new ArgumentException("PSNR buffers must be equally sized RGB triples");
-        }
-        var squared = 0.0;
-        for (var i = 0; i < candidate.Length; i++)
-        {
-            var difference = candidate[i] - reference[i];
-            squared += difference * difference;
-        }
-        var mse = squared / candidate.Length;
-        return mse <= 0 ? double.PositiveInfinity : 10.0 * Math.Log10(255.0 * 255.0 / mse);
-    }
+    internal static double Psnr(byte[] candidate, byte[] reference) =>
+        RasterMetrics.Psnr(candidate, reference);
 
     /// <summary>PSNR over a rectangular region, in top-down pixel coordinates.</summary>
     internal static double PsnrRegion(byte[] candidate, byte[] reference, int width, int height,
-        int x, int y, int regionWidth, int regionHeight)
-    {
-        if (candidate.Length != reference.Length || width <= 0 || height <= 0
-            || candidate.Length != width * height * 3)
-        {
-            throw new ArgumentException("PSNR buffers must be equally sized RGB triples of width*height");
-        }
-        if (x < 0 || y < 0 || regionWidth <= 0 || regionHeight <= 0
-            || x + regionWidth > width || y + regionHeight > height)
-        {
-            throw new ArgumentException("PSNR region does not fit the image");
-        }
-        var squared = 0.0;
-        for (var row = y; row < y + regionHeight; row++)
-        {
-            var start = (row * width + x) * 3;
-            var end = start + regionWidth * 3;
-            for (var i = start; i < end; i++)
-            {
-                var difference = candidate[i] - reference[i];
-                squared += difference * difference;
-            }
-        }
-        var mse = squared / (regionWidth * regionHeight * 3.0);
-        return mse <= 0 ? double.PositiveInfinity : 10.0 * Math.Log10(255.0 * 255.0 / mse);
-    }
+        int x, int y, int regionWidth, int regionHeight) =>
+        RasterMetrics.PsnrRegion(candidate, reference, width, height, x, y, regionWidth,
+            regionHeight);
 
     /// <summary>Binary PPM (P6) of a top-down RGB frame, for eyeballing a capture.</summary>
     internal static void WritePpm(string path, byte[] rgb, int width, int height)

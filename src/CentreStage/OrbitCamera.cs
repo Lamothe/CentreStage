@@ -106,6 +106,17 @@ internal sealed class OrbitCamera
 
     private float _frustumHalfDepth = 1f;
 
+    /// <summary>
+    /// Aims the orbit at a fixed world point at a fixed distance, overriding the
+    /// bounding-box fit. The clip planes follow the new distance.
+    /// </summary>
+    public void Focus(Vector3 target, float distance)
+    {
+        Target = target;
+        Distance = MathF.Max(distance, 0.05f);
+        UpdateClip();
+    }
+
     private void UpdateClip()
     {
         Near = MathF.Max(Distance * 0.001f, 0.001f);

@@ -134,10 +134,15 @@ internal sealed class StatusOverlay : IDisposable
     /// </summary>
     public void DrawHud(int width, int height, string text, float size, Vector4 color)
     {
+        DrawTextAt(width, height, text, 16f, height - size - 16f, size, color);
+    }
+
+    public void DrawTextAt(int width, int height, string text, float x, float y, float size, Vector4 color)
+    {
         _width = width;
         _height = height;
         _vertsUsed = 0;
-        DrawText(text, 16f, height - size - 16f, size, color);
+        DrawText(text, x, y, size, color);
         Flush();
     }
 

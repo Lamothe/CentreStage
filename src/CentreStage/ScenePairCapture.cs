@@ -15,10 +15,9 @@ namespace CentreStage;
 /// <summary>Fixed, split-by-camera-and-lighting, same-extent scene capture.</summary>
 internal static class ScenePairCapture
 {
-    private const int Width = 256;
-    private const int Height = 256;
-    private const string AssetHash = "ab34f516d6bb8d337e7607c337d1158726b46e15b2880391f7d48bb76b83f22a";
-    private static readonly string[] DiagnosticVariables =
+    private const string DefaultAssetHash = "ab34f516d6bb8d337e7607c337d1158726b46e15b2880391f7d48bb76b83f22a";
+    internal const string AssetHash = DefaultAssetHash;
+    internal static readonly string[] DiagnosticVariables =
     [
         "CENTRESTAGE_SOLID", "CENTRESTAGE_WIREFRAME", "CENTRESTAGE_STATUS_TEST",
         "CENTRESTAGE_AUTO_CLOSE_MS", "CENTRESTAGE_SYNTH_CLICK", "CENTRESTAGE_SYNTH_MENU",
@@ -30,7 +29,40 @@ internal static class ScenePairCapture
     // Angles are absolute radians, not interpolated or randomly sampled.
     private sealed record Group(string Split, float[] Yaws, float Pitch, Vector3 Direction,
         Vector3 Colour, float Intensity, Vector3 Sky, Vector3 Ground);
-    private static readonly Group[] Groups =
+
+    /// <summary>
+    /// One capture problem: raster size, the camera framing held fixed for every
+    /// frame, and its split groups. A null focus keeps the whole-model bounding-box
+    /// framing; a focus aims the orbit centre at a fixed world point at a fixed
+    /// distance, which is how the face close-up is framed identically at every yaw.
+    /// </summary>
+    private sealed record View(string Name, int RasterWidth, int RasterHeight, Vector3? Focus,
+        float FocusDistance, Group[] Groups);
+
+    /// <summary>
+    /// The locked face test frame, shared by the capture and the demo view so the two
+    /// cannot drift apart. This is held-out data: no training or validation frame uses
+    /// this yaw, pitch or light.
+    /// </summary>
+    internal sealed record LockedFaceView(int Size, Vector3 Focus, float Distance, float Yaw,
+        float Pitch, Vector3 LightDirection, Vector3 Colour, float LightIntensity, Vector3 Sky,
+        Vector3 Ground);
+
+    private const float FaceFocusX = 0.053f;
+    private const float FaceFocusY = 1.411f;
+    private const float FaceFocusZ = 0.009f;
+    private const float FaceDistance = 0.36f;
+
+    private static readonly Vector3 FaceFocus = new(FaceFocusX, FaceFocusY, FaceFocusZ);
+    private static readonly Group FaceTest = new("test", [0.62f, 0.70f], -0.10f,
+        new(-1.1f, -0.7f, -0.9f), new(1.0f, 0.88f, 0.78f), 3.0f, new(0.50f, 0.48f, 0.55f),
+        new(0.18f, 0.17f, 0.20f));
+
+    internal static LockedFaceView FaceTestView => new(Face.RasterWidth, FaceFocus, FaceDistance,
+        FaceTest.Yaws[0], FaceTest.Pitch, Vector3.Normalize(FaceTest.Direction), FaceTest.Colour,
+        FaceTest.Intensity, FaceTest.Sky, FaceTest.Ground);
+
+    private static readonly View FullBody = new("full-body", 256, 256, null, 0f,
     [
         new("train", [-1.35f, -1.15f, -0.95f, -0.75f, -0.55f, -0.35f, -0.15f, 0.05f], -0.45f,
             new(-2, -4, -2), new(1.0f, 0.95f, 0.9f), 2.5f, new(0.45f, 0.55f, 0.70f), new(0.22f, 0.20f, 0.18f)),
@@ -38,7 +70,23 @@ internal static class ScenePairCapture
             new(3, -5, -1), new(0.8f, 0.9f, 1.0f), 2.0f, new(0.40f, 0.50f, 0.65f), new(0.20f, 0.18f, 0.16f)),
         new("test", [0.85f, 1.05f], -0.25f,
             new(-1, -3, 4), new(1.0f, 0.85f, 0.7f), 3.0f, new(0.50f, 0.48f, 0.55f), new(0.18f, 0.17f, 0.20f))
-    ];
+    ]);
+
+    // Head-and-shoulders framing measured from the locked full-body test view: the
+    // head spans rows 7..48 of 256 at the test camera, which projects to a centre of
+    // about (0.05, 1.47, -0.02) world. Yaw is measured from the character's facing
+    // direction (+Z), and every split stays in front of the face (|yaw| < pi/2), so
+    // all frames show the face. The key light is in front (the renderer treats
+    // Direction as the light's travel direction), so the portrait exercises skin
+    // specular and normal-map detail the cheap pass omits.
+    private static readonly View Face = new("face", 640, 640, FaceFocus, FaceDistance,
+    [
+        new("train", [-0.45f, -0.325f, -0.20f, -0.075f, 0.05f, 0.175f, 0.30f], -0.06f,
+            new(-0.6f, -1.0f, -1.2f), new(1.0f, 0.96f, 0.92f), 2.6f, new(0.42f, 0.45f, 0.52f), new(0.18f, 0.16f, 0.15f)),
+        new("val", [0.40f, 0.48f], -0.02f,
+            new(0.9f, -0.8f, -1.0f), new(0.9f, 0.94f, 1.0f), 2.2f, new(0.38f, 0.42f, 0.50f), new(0.16f, 0.15f, 0.16f)),
+        FaceTest,
+    ]);
 
     [DllImport("libc", SetLastError = true, EntryPoint = "mkdir")]
     private static extern int Mkdir(string path, uint mode);
@@ -47,9 +95,16 @@ internal static class ScenePairCapture
     {
         try
         {
-            if (args.Length != 3 || args[1] != "--scene-pairs" || args[0].StartsWith('-') || args[2].StartsWith('-'))
+            var view = args.Length == 3 ? args[1] switch
             {
-                throw new ArgumentException("usage: CentreStage <snapshot.glb> --scene-pairs <new-directory>");
+                "--scene-pairs" => FullBody,
+                "--scene-face-pairs" => Face,
+                _ => null,
+            } : null;
+            if (view is null || args[0].StartsWith('-') || args[2].StartsWith('-'))
+            {
+                throw new ArgumentException(
+                    "usage: CentreStage <snapshot.glb> --scene-pairs|--scene-face-pairs <new-directory>");
             }
             foreach (var name in DiagnosticVariables)
             {
@@ -64,18 +119,14 @@ internal static class ScenePairCapture
             }
             var asset = Path.GetFullPath(args[0]);
             var output = Path.GetFullPath(args[2]);
-            var hash = HashFile(asset);
-            if (!string.Equals(hash, AssetHash, StringComparison.Ordinal))
-            {
-                throw new InvalidDataException("asset is not the specified Teen Kitty snapshot (SHA-256 mismatch)");
-            }
+            var hash = VerifySnapshot(asset);
             // mkdir(2), unlike Directory.CreateDirectory, is atomic and rejects all existing
             // entries, including dangling symlinks. Parent must already exist.
             if (Mkdir(output, Convert.ToUInt32("700", 8)) != 0)
             {
                 throw new IOException($"cannot exclusively create '{output}': {new Win32Exception(Marshal.GetLastPInvokeError()).Message}");
             }
-            Capture(asset, hash, output);
+            Capture(asset, hash, output, view);
         }
         catch (Exception ex)
         {
@@ -90,19 +141,50 @@ internal static class ScenePairCapture
         return Convert.ToHexStringLower(SHA256.HashData(stream));
     }
 
-    private static unsafe void Capture(string asset, string assetHash, string output)
+    /// <summary>
+    /// Rejects the diagnostic overrides that replace what the scene shaders do. Any
+    /// caller that draws conclusions from the cheap/full difference must refuse these.
+    /// </summary>
+    internal static void RejectDiagnosticVariables()
     {
+        foreach (var name in DiagnosticVariables)
+        {
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name)))
+            {
+                throw new InvalidOperationException($"unset diagnostic variable {name} first");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Confirms the file is the snapshot the locked, trained test view belongs to.
+    /// The view and light are hardcoded, so any other asset makes the comparison meaningless.
+    /// </summary>
+    internal static string VerifySnapshot(string path)
+    {
+        var hash = HashFile(path);
+        if (!string.Equals(hash, AssetHash, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("asset is not the specified Teen Kitty snapshot (SHA-256 mismatch)");
+        }
+        return hash;
+    }
+
+    private static unsafe void Capture(string asset, string assetHash, string output, View view)
+    {
+        var width = view.RasterWidth;
+        var height = view.RasterHeight;
         var model = GltfModel.Load(asset);
         if (HashFile(asset) != assetHash)
         {
             throw new IOException("snapshot changed during loading");
         }
-        var frames = Groups.SelectMany(g => g.Yaws.Select((yaw, i) => (group: g, yaw, index: i))).ToArray();
+        var frames = view.Groups.SelectMany(g => g.Yaws.Select((yaw, i) => (group: g, yaw, index: i))).ToArray();
         var records = new List<object>();
-        var manifests = Groups.ToDictionary(g => g.Split, _ => new StringBuilder());
+        var manifests = view.Groups.ToDictionary(g => g.Split, _ => new StringBuilder());
         var options = WindowOptions.Default with
         {
-            Size = new Vector2D<int>(Width, Height), Title = "Centre Stage scene pairs",
+            Size = new Vector2D<int>(width, height), Title = "Centre Stage scene pairs",
             API = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.ForwardCompatible, new APIVersion(3, 3)),
             VSync = false, IsVisible = false, ShouldSwapAutomatically = false,
         };
@@ -116,9 +198,9 @@ internal static class ScenePairCapture
         window.Load += () =>
         {
             gl = window.CreateOpenGL();
-            if (window.FramebufferSize.X != Width || window.FramebufferSize.Y != Height)
+            if (window.FramebufferSize.X != width || window.FramebufferSize.Y != height)
             {
-                throw new InvalidOperationException($"framebuffer is {window.FramebufferSize.X}x{window.FramebufferSize.Y}, expected {Width}x{Height}");
+                throw new InvalidOperationException($"framebuffer is {window.FramebufferSize.X}x{window.FramebufferSize.Y}, expected {width}x{height}");
             }
             graphics = $"{Marshal.PtrToStringAnsi((nint)gl.GetString(StringName.Vendor))} | {Marshal.PtrToStringAnsi((nint)gl.GetString(StringName.Renderer))} | {Marshal.PtrToStringAnsi((nint)gl.GetString(StringName.Version))}";
             var decoded = Renderer.DecodeTextures(model.Textures);
@@ -135,9 +217,9 @@ internal static class ScenePairCapture
             {
                 throw new InvalidOperationException("renderer geometry bounds differ");
             }
-            camera.SetFrameAspect((float)Width / Height);
+            camera.SetFrameAspect((float)width / height);
             // Fit for each view to avoid clipping; each pair uses exactly the same camera.
-            gl.Viewport(0, 0, Width, Height);
+            gl.Viewport(0, 0, (uint)width, (uint)height);
         };
         window.Render += _ =>
         {
@@ -145,7 +227,7 @@ internal static class ScenePairCapture
             {
                 throw new InvalidOperationException("renderers not ready");
             }
-            if (window.FramebufferSize.X != Width || window.FramebufferSize.Y != Height)
+            if (window.FramebufferSize.X != width || window.FramebufferSize.Y != height)
             {
                 throw new InvalidOperationException("framebuffer size changed during capture");
             }
@@ -154,6 +236,10 @@ internal static class ScenePairCapture
             camera.Yaw = frame.yaw;
             camera.Pitch = g.Pitch;
             camera.FrameBounds(full.Bounds.min, full.Bounds.max);
+            if (view.Focus is { } focus)
+            {
+                camera.Focus(focus, view.FocusDistance);
+            }
             var direction = Vector3.Normalize(g.Direction);
             RuntimeLight[] lights = [new RuntimeLight { Type = LightType.Directional, Direction = direction, Color = g.Colour, Intensity = g.Intensity }];
             var stem = $"{g.Split}-{frame.index:D3}";
@@ -202,10 +288,10 @@ internal static class ScenePairCapture
 
             (string Hash, byte[] Rgb, double DrawMs) DrawAndSave(Renderer renderer, string name)
             {
-                // Wall-clock milliseconds around Draw + gl.Finish at 256x256: honest
+                // Wall-clock milliseconds around Draw + gl.Finish at this raster: honest
                 // measurement of this run, noisy at this scale, not real-time evidence.
                 var stopwatch = Stopwatch.StartNew();
-                renderer.Draw(camera, (float)Width / Height, lights, g.Sky, g.Ground, null);
+                renderer.Draw(camera, (float)width / height, lights, g.Sky, g.Ground, null);
                 gl.Finish();
                 stopwatch.Stop();
                 var error = gl.GetError();
@@ -213,30 +299,30 @@ internal static class ScenePairCapture
                 {
                     throw new InvalidOperationException($"GL error drawing {name}: {error}");
                 }
-                var rgba = new byte[Width * Height * 4];
+                var rgba = new byte[width * height * 4];
                 fixed (byte* p = rgba)
                 {
-                    gl.ReadPixels(0, 0, Width, Height, PixelFormat.Rgba, PixelType.UnsignedByte, p);
+                    gl.ReadPixels(0, 0, (uint)width, (uint)height, PixelFormat.Rgba, PixelType.UnsignedByte, p);
                 }
                 error = gl.GetError();
                 if (error != GLEnum.NoError)
                 {
                     throw new InvalidOperationException($"GL error reading {name}: {error}");
                 }
-                var rgb = new byte[Width * Height * 3];
-                for (var y = 0; y < Height; y++)
+                var rgb = new byte[width * height * 3];
+                for (var y = 0; y < height; y++)
                 {
-                    for (var x = 0; x < Width; x++)
+                    for (var x = 0; x < width; x++)
                     {
-                        var src = ((Height - 1 - y) * Width + x) * 4;
-                        var dst = (y * Width + x) * 3;
+                        var src = ((height - 1 - y) * width + x) * 4;
+                        var dst = (y * width + x) * 3;
                         Array.Copy(rgba, src, rgb, dst, 3);
                     }
                 }
                 var path = Path.Combine(output, name);
                 using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
-                    file.Write(Encoding.ASCII.GetBytes($"P6\n{Width} {Height}\n255\n"));
+                    file.Write(Encoding.ASCII.GetBytes($"P6\n{width} {height}\n255\n"));
                     file.Write(rgb);
                 }
                 return (HashFile(path), rgb, stopwatch.Elapsed.TotalMilliseconds);
@@ -264,10 +350,11 @@ internal static class ScenePairCapture
         }
         var metadata = new
         {
-            schema = "centrestage-scene-pairs-v2",
+            schema = "centrestage-scene-pairs-v3",
             label = "scene-training pairs for a neural rendering demonstration (not DLSS5)",
+            framing = view.Name,
             asset, assetSha256 = assetHash,
-            width = Width, height = Height, format = "P6 RGB8 top-down", pose = "authored rest pose baked; animation disabled",
+            width = width, height = height, format = "P6 RGB8 top-down", pose = "authored rest pose baked; animation disabled",
             renderer = graphics, lightPolicy = "one declared directional light per split; asset lights replaced",
             cheapPass = "reduced texture/lighting fidelity: base colour sampled at +2.0 mip LOD bias (mip-capable samplers only), auxiliary material maps not sampled (factors only), Lambert diffuse + hemispheric ambient + factor-only emissive; GGX specular, clearcoat, sheen, transmission and normal-map perturbation omitted",
             timingNote = "cheapRenderMs/fullRenderMs are wall-clock milliseconds around Draw + gl.Finish at this resolution on this driver; the timed draw order alternates per frame; noisy, not real-time evidence",

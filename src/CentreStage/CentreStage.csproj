@@ -5,9 +5,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- The built native host library (linux/build-native-host.sh output):
-         flows to build and publish output next to the app for the DLSS seam. -->
+    <!-- The built native host libraries flow to output for their opt-in demos. -->
     <None Update="runtimes\linux-x64\native\libdlss5_nr_host.so"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Update="runtimes\linux-x64\native\libscene_host.so"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

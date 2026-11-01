@@ -15,9 +15,45 @@ internal static class Program
 {
     private static void Main(string[] args)
     {
-        if (args.Contains("--scene-pairs"))
+        if (args.Contains("--scene-pairs") || args.Contains("--scene-face-pairs"))
         {
             ScenePairCapture.Run(args);
+            return;
+        }
+        if (args.Contains("--scene-neural-demo"))
+        {
+            var model = args.FirstOrDefault(x => !x.StartsWith("--", StringComparison.Ordinal)
+                && !IsOptionValue(args, x, "--scene-neural-demo"));
+            var checkpoint = GetOption(args, "--scene-neural-demo");
+            // The checkpoint is a .pt, so requiring the model extension also catches the
+            // two arguments being swapped.
+            var looksLikeModel = model is not null
+                && (model.EndsWith(".glb", StringComparison.OrdinalIgnoreCase)
+                    || model.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase));
+            if (!looksLikeModel || checkpoint is null || !File.Exists(model) || !File.Exists(checkpoint))
+            {
+                Console.Error.WriteLine("usage: CentreStage <snapshot.glb> --scene-neural-demo <trusted-checkpoint.pt>");
+                Environment.ExitCode = 1;
+                return;
+            }
+            SceneNeuralDemo.Run(model, checkpoint);
+            return;
+        }
+        if (args.Contains("--face-neural-demo"))
+        {
+            var model = args.FirstOrDefault(x => !x.StartsWith("--", StringComparison.Ordinal)
+                && !IsOptionValue(args, x, "--face-neural-demo"));
+            var checkpoint = GetOption(args, "--face-neural-demo");
+            var looksLikeModel = model is not null
+                && (model.EndsWith(".glb", StringComparison.OrdinalIgnoreCase)
+                    || model.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase));
+            if (!looksLikeModel || checkpoint is null || !File.Exists(model) || !File.Exists(checkpoint))
+            {
+                Console.Error.WriteLine("usage: CentreStage <snapshot.glb> --face-neural-demo <face-checkpoint.pt>");
+                Environment.ExitCode = 1;
+                return;
+            }
+            FaceNeuralDemo.Run(model, checkpoint);
             return;
         }
 
@@ -162,6 +198,9 @@ internal static class Program
         Console.WriteLine("usage: CentreStage <model.glb|model.gltf> [--inspect]");
         Console.WriteLine("       CentreStage --inspect <model.glb>");
         Console.WriteLine("       CentreStage <snapshot.glb> --scene-pairs <new-directory>");
+        Console.WriteLine("       CentreStage <snapshot.glb> --scene-face-pairs <new-directory>");
+        Console.WriteLine("       CentreStage <snapshot.glb> --scene-neural-demo <scene-model.pt>");
+        Console.WriteLine("       CentreStage <snapshot.glb> --face-neural-demo <face-model.pt>");
         Console.WriteLine("       CentreStage <model.glb> --capture out.png [--frames N]");
         Console.WriteLine("       CentreStage <model.glb> --dlss-demo outdir   (unattended: live + processed evidence)");
         Console.WriteLine("viewer: F9 processes one frame through the dlss5-linux native host (frame-by-frame,");

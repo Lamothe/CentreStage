@@ -29,8 +29,21 @@ tests/CentreStage.Core.Tests/  xUnit tests over hand-built in-memory GLBs
 dotnet run --project src/CentreStage -- <model.glb>              # interactive viewer
 dotnet run --project src/CentreStage -- --inspect <model.glb>    # dump structure, no window
 dotnet run --project src/CentreStage -- <model.glb> --capture out.png   # offscreen render
-dotnet run --project src/CentreStage -- <model.glb> --dlss-demo outdir  # unattended DLSS evidence run
+dotnet run --project src/CentreStage -- <model.glb> --dlss-demo outdir  # unattended DLSS seam evidence run
+./linux/build-scene-host.sh
+CENTRESTAGE_SCENE_LIBRARY="$PWD/src/CentreStage/runtimes/linux-x64/native/libscene_host.so" \
+  dotnet run --project src/CentreStage -- <snapshot.glb> --scene-neural-demo <trusted-scene-model.pt>
+CENTRESTAGE_SCENE_LIBRARY="$PWD/src/CentreStage/runtimes/linux-x64/native/libscene_host.so" \
+  dotnet run --project src/CentreStage -- <snapshot.glb> --face-neural-demo <trusted-face-model.pt>
 ```
+
+The native inference ABI is built and packaged by `linux/build-scene-host.sh` (or point `CENTRESTAGE_SCENE_LIBRARY` at a built `libscene_host.so`).
+
+`--scene-neural-demo` opens a separate opt-in application view over the same trusted snapshot. Centre Stage draws the locked test-000 view and light twice at 256×256 — once with the full scene shader (the reference) and once with the reduced-fidelity shader (the cheap frame) — and only the cheap frame goes to the locally trained `scene-train` CPU model. The window shows three panels (reference, cheap, neural) with each variant's PSNR against the reference, plus a magnified crop of the head and torso so the change is visible. F10 swaps the cheap and neural panels, Esc closes. The startup log prints the host path, the host's own transform label and the measured PSNRs.
+
+`--face-neural-demo` shows a head-and-shoulders close-up instead: the locked, held-out face frame is drawn twice at 640×640 (full shader and reduced shader), only the cheap frame goes through a face-trained model, and the reference and neural output are shown side by side with a magnified crop of the face and the cheap input beneath. F10 swaps the panels, Esc closes. It needs its own checkpoint: the full-body model is trained on a different framing and light. Both views print the host path, the host's own label and whole-frame PSNR on the held-out frame; `--face-neural-demo` also prints PSNR for a head box and a face-only box.
+
+Both views are scene-specific — the camera, light and asset are fixed, and any other GLB is rejected by SHA-256 — and neither is a general live renderer or DLSS 5. Each reproduces one or two locked held-out frames and produces run-scoped evidence: the PSNR log, `CENTRESTAGE_SCENE_DUMP=<dir>` (captured frames as PPM) and `CENTRESTAGE_WINDOW_DUMP=<file>` (the composed window once, then close) — the last two avoid a screen-capture portal. The training-side records are the run reports in dlss5-linux; on both, PSNR and the lighting proxy improve while the detail-gradient proxy regresses slightly (the small model smooths fine texture).
 
 Mouse: left-drag orbit, middle-drag pan, scroll zoom, double-click or F11 toggles
 fullscreen (right-click opens the demo's context menu while the seam is

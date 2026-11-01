@@ -9,13 +9,16 @@ not exist, even as a dangling symlink. Keep the parent and new output directory
 under your exclusive control during capture. A failed or interrupted run can
 leave partial data; **only a completed run with `metadata.json` is usable**.
 Never resume or overwrite a failed run; choose a new directory. Free space is
-required for 24 images, two renderers and the decoded asset.
+required for the view's images (24 for the full-body view, 22 for the face view), two renderers and the decoded asset.
 
 ```sh
 dotnet run --project src/CentreStage -- \
   /home/michael/Projects/dlss5-linux/.scratch/scene-assets/Teen_Kitty_rigged-ab34f516d6bb8d337e7607c337d1158726b46e15b2880391f7d48bb76b83f22a.glb \
   --scene-pairs /path/to/new-output-directory
 ```
+
+For the face close-up, substitute `--scene-face-pairs`; the frame names, split
+names and manifests are identical, only the framing and raster size differ.
 
 Capture rejects non-empty diagnostic environment variables: `CENTRESTAGE_SOLID`,
 `CENTRESTAGE_WIREFRAME`, `CENTRESTAGE_STATUS_TEST`, `CENTRESTAGE_AUTO_CLOSE_MS`,
@@ -26,15 +29,20 @@ Capture rejects non-empty diagnostic environment variables: `CENTRESTAGE_SOLID`,
 input context or inject input, and does not invoke the DLSS seam. It refuses
 an unexpected framebuffer size rather than silently scaling.
 
-Predeclared groups: train (8 views), validation (2), locked test (2). Each
-split has its own yaw interval, pitch and directional light/ambient combination;
-all use the authored rest pose baked with animation disabled, same asset and
-per-view framing. Asset lights
+Two framings are defined. `--scene-pairs` is the full-body view: 256×256,
+train (8 views), validation (2), locked test (2). `--scene-face-pairs` is a
+head-and-shoulders close-up: 640×640 with a fixed orbit focus at
+(0.053, 1.411, 0.009) and 0.36 m distance, train (7 views), validation (2),
+locked test (2). Each split has its own yaw interval, pitch and directional
+light/ambient combination; all use the authored rest pose baked with animation
+disabled, same asset and per-view framing. Every split stays in front of the
+face (|yaw| < pi/2), where yaw is measured from the character's facing
+direction (+Z). Asset lights
 are replaced by the explicitly specified single directional light. Train, val and
 test TSV files contain relative `cheap.ppm<TAB>full.ppm` paths with no header,
 compatible with `scene-train`. The locked test set must not be used for model
-selection. Frames are same-resolution 256×256 P6 RGB8 in top-down row order,
-without overlays.
+selection. Frames are same-resolution P6 RGB8 (256×256 for the full-body view, 640×640
+for the face view) in top-down row order, without overlays.
 
 The two per-frame renderers are the full PBR pass and a **cheap pass with
 genuinely reduced texture and lighting fidelity** — not a resolution reduction
@@ -65,7 +73,8 @@ noisy at this scale, not real-time evidence and not a general performance claim.
 absolute camera and lighting parameters, format, pose and GL implementation,
 the cheap-pass description, and per frame the render timings and the
 cheap-versus-full raster difference (`cheapFullMaxAbsDiff`,
-`cheapFullMeanAbsDiff`). The schema is `centrestage-scene-pairs-v2`.
+`cheapFullMeanAbsDiff`). The schema is `centrestage-scene-pairs-v3`; a `framing` field names the view
+(`full-body` or `face`).
 The final metadata file is the completion marker. Archive the source/build,
 command and logs as well. Frame specification is deterministic, but OpenGL
 rasterisation and bytes can differ between drivers; hashes record the actual

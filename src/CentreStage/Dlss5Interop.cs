@@ -12,7 +12,6 @@
 // CentreStage records it in the demo report, not as a banner). The demonstration
 // evaluator costs seconds per frame. Both are on-demand frame-by-frame
 // processing with visible latency, never real-time upscaling.
-using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace CentreStage;
@@ -29,9 +28,9 @@ internal enum Dlss5Status
 }
 
 /// <summary>
-/// Raw imports of vr/native-host.h. The library resolves through
-/// <see cref="ResolveNative"/>: CENTRESTAGE_DLSS_LIB (an explicit path) wins,
-/// then the runtimes folder next to the app binary, then normal probing.
+/// Raw imports of vr/native-host.h. Resolution is owned by
+/// <see cref="NativeLibraryLoader"/>: CENTRESTAGE_DLSS_LIB is tried first, then the
+/// runtimes folder next to the app binary, then normal probing.
 /// </summary>
 internal static partial class Dlss5Native
 {
@@ -39,32 +38,7 @@ internal static partial class Dlss5Native
 
     static Dlss5Native()
     {
-        NativeLibrary.SetDllImportResolver(typeof(Dlss5Native).Assembly, ResolveNative);
-    }
-
-    private static IntPtr ResolveNative(string name, Assembly assembly, DllImportSearchPath? searchPath)
-    {
-        if (name != Lib)
-        {
-            return IntPtr.Zero;
-        }
-
-        var explicitPath = Environment.GetEnvironmentVariable("CENTRESTAGE_DLSS_LIB");
-        if (!string.IsNullOrEmpty(explicitPath) && NativeLibrary.TryLoad(explicitPath, out var fromEnv))
-        {
-            return fromEnv;
-        }
-
-        var local = Path.Combine(AppContext.BaseDirectory, "runtimes", "linux-x64", "native",
-            "libdlss5_nr_host.so");
-        if (NativeLibrary.TryLoad(local, out var fromRuntimes))
-        {
-            return fromRuntimes;
-        }
-
-        return NativeLibrary.TryLoad("libdlss5_nr_host.so", assembly, searchPath, out var probed)
-            ? probed
-            : IntPtr.Zero;
+        NativeLibraryLoader.EnsureRegistered();
     }
 
     [LibraryImport(Lib, EntryPoint = "dlss5_nr_label")]
@@ -164,13 +138,6 @@ internal sealed class Dlss5Pipeline : IDisposable
     public int OutputWidth => Width * Math.Max(1, DemoScale);
     public int OutputHeight => Height * Math.Max(1, DemoScale);
 
-    /// <summary>
-    /// Enables the demonstration transform (NOT DLSS5): a real upscaler
-    /// runs behind the same ABI (a learned model with real open weights
-    /// when loaded, or the classical Lanczos3 scaler) so the presented
-    /// result visibly differs at the demo geometry. scale 2..4; 0 restores
-    /// the synthetic pipeline.
-    /// </summary>
     /// <summary>The A/B kernel: 1 = Lanczos3, 2 = the bilinear baseline,
     /// 3 = the neural demonstration (requires loaded real weights).</summary>
     public Dlss5Status SetDemoKernel(int kernel)
@@ -179,8 +146,16 @@ internal sealed class Dlss5Pipeline : IDisposable
         return Dlss5Native.SetDemoKernel(_handle, kernel);
     }
 
+    /// <summary>
+    /// Enables the demonstration transform (NOT DLSS5): a real upscaler
+    /// runs behind the same ABI (a learned model with real open weights
+    /// when loaded, or the classical Lanczos3 scaler) so the presented
+    /// result visibly differs at the demo geometry. scale 2..4; 0 restores
+    /// the synthetic pipeline.
+    /// </summary>
     public Dlss5Status SetDemoTransform(int scale)
     {
+        ObjectDisposedException.ThrowIf(_handle == IntPtr.Zero, this);
         var status = Dlss5Native.SetDemoTransform(_handle, scale);
         if (status == Dlss5Status.Ok)
         {

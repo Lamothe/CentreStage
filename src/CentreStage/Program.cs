@@ -284,11 +284,43 @@ internal static class Program
     }
 
     /// <summary>
+    /// Opt-in multisampling for a window framebuffer: <c>CENTRESTAGE_MSAA=4</c>
+    /// requests four samples, anything below two leaves the existing single-sample
+    /// path. The renderer keys alpha-to-coverage off the framebuffer's actual
+    /// sample count, so a driver that cannot supply the request falls back to the
+    /// current behaviour rather than failing.
+    /// </summary>
+    private static int RequestedMsaaSamples()
+    {
+        return int.TryParse(Environment.GetEnvironmentVariable("CENTRESTAGE_MSAA"), out var samples)
+            && samples >= 2
+            ? Math.Min(samples, 8)
+            : 1;
+    }
+
+    private static void LogMsaa(GL gl, int requested, string label)
+    {
+        if (requested < 2)
+        {
+            return;
+        }
+
+        var actual = gl.GetInteger(GetPName.Samples);
+        var max = gl.GetInteger(GLEnum.MaxSamples);
+        Console.WriteLine(actual > 1
+            ? $"  msaa: {label} framebuffer has {actual} samples (requested {requested}, max {max}); "
+              + "alpha-to-coverage enabled for the blend pass"
+            : $"  msaa: {label} framebuffer is single-sample (requested {requested}, max {max}); "
+              + "staying on the current blending path");
+    }
+
+    /// <summary>
     /// Offscreen render: hidden window, draw a few frames, read the framebuffer to a PNG.
     /// Used for verification without putting windows on any display.
     /// </summary>
     private static unsafe void RunCapture(string path, GltfModel model, string outputPath, int frames, int animIndex = 0, float time = 0f, bool animate = true)
     {
+        var msaaSamples = RequestedMsaaSamples();
         var options = WindowOptions.Default with
         {
             Size = new Vector2D<int>(1280, 800),
@@ -296,6 +328,7 @@ internal static class Program
             API = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.ForwardCompatible, new APIVersion(3, 3)),
             VSync = false,
             IsVisible = false,
+            Samples = msaaSamples,
         };
 
         var window = Window.Create(options);
@@ -308,6 +341,7 @@ internal static class Program
         window.Load += () =>
         {
             gl = window.CreateOpenGL();
+            LogMsaa(gl, msaaSamples, "capture");
             var decoded = Renderer.DecodeTextures(model.Textures);
             renderer = new Renderer(gl, model, decoded, animate);
             camera.SetFrameAspect(1280f / 800f);
@@ -420,12 +454,14 @@ internal static class Program
     /// </summary>
     private static void RunViewer(string path, bool animate = true, string? dlssDemoDir = null)
     {
+        var msaaSamples = RequestedMsaaSamples();
         var options = WindowOptions.Default with
         {
             Size = new Vector2D<int>(1280, 800),
             Title = $"Centre Stage — loading {Path.GetFileName(path)}…",
             API = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.ForwardCompatible, new APIVersion(3, 3)),
             VSync = true,
+            Samples = msaaSamples,
         };
         // Optional placement hint (works on X11/XWayland; ignored on native
         // Wayland): the unattended runs park the window on the secondary
@@ -531,6 +567,7 @@ internal static class Program
         window.Load += () =>
         {
             gl = window.CreateOpenGL();
+            LogMsaa(gl, msaaSamples, "viewer");
             overlay = new StatusOverlay(gl);
             // The seam is optional: a construction failure (FBO/shader) must
             // degrade to plain viewing, never kill the viewer. In demo mode

@@ -758,7 +758,35 @@ internal sealed unsafe class Renderer : IDisposable
     /// </summary>
     public void Draw(OrbitCamera camera, float aspect, IReadOnlyList<RuntimeLight> lights, Vector3 sky, Vector3 ground, ScenePose? pose = null)
     {
-        _gl.ClearColor(sky.X * 0.25f, sky.Y * 0.25f, sky.Z * 0.25f, 1f);
+        DrawCore(camera, aspect, lights, sky, ground, pose, coverage: false, blendMaterialPrefix: null);
+    }
+
+    /// <summary>
+    /// Diagnostic coverage pass: draws the opaque depth first, then composites only the
+    /// blended primitives in front of it and leaves their accumulated coverage in the
+    /// alpha channel (the colour channels are not meaningful). A pixel that never sees
+    /// a blend fragment stays at alpha 0; a pixel covered by an opaque layer reaches 1.
+    /// The caller must supply an RGBA target. <paramref name="blendMaterialPrefix"/>
+    /// optionally restricts the measurement to one material family (for example "hair").
+    /// </summary>
+    public void DrawCoverage(OrbitCamera camera, float aspect, IReadOnlyList<RuntimeLight> lights,
+        Vector3 sky, Vector3 ground, ScenePose? pose = null, string? blendMaterialPrefix = null)
+    {
+        DrawCore(camera, aspect, lights, sky, ground, pose, coverage: true, blendMaterialPrefix);
+    }
+
+    private void DrawCore(OrbitCamera camera, float aspect, IReadOnlyList<RuntimeLight> lights,
+        Vector3 sky, Vector3 ground, ScenePose? pose, bool coverage, string? blendMaterialPrefix)
+    {
+        // Alpha-to-coverage needs a multisampled draw framebuffer. Key on the
+        // framebuffer actually bound, not on a global flag: the demo captures render
+        // into their own single-sample FBOs, so they keep the exact blending they
+        // were pinned against even when the window is multisampled.
+        var msaa = _gl.GetInteger(GetPName.Samples) > 1;
+        _gl.Disable(EnableCap.SampleAlphaToCoverage);
+        _gl.Disable(EnableCap.SampleAlphaToOne);
+
+        _gl.ClearColor(sky.X * 0.25f, sky.Y * 0.25f, sky.Z * 0.25f, coverage ? 0f : 1f);
         _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
         _gl.UseProgram(_program);
@@ -788,6 +816,12 @@ internal sealed unsafe class Renderer : IDisposable
 
         _gl.DepthMask(true);
         _gl.Disable(EnableCap.Blend);
+        if (coverage)
+        {
+            // The opaque pass exists only for its depth: keep its alpha out of the
+            // coverage channel so the blend pass alone fills it.
+            _gl.ColorMask(true, true, true, false);
+        }
 
         // Opaque + masked first (depth writes on). Blended primitives then draw in
         // per-triangle back-to-front order (the painter's algorithm): straight-alpha
@@ -813,8 +847,30 @@ internal sealed unsafe class Renderer : IDisposable
             if (pass == AlphaMode.Blend)
             {
                 _gl.Enable(EnableCap.Blend);
-                _gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+                if (coverage)
+                {
+                    _gl.ColorMask(true, true, true, true);
+                    // Accumulate the blended layers' union coverage in alpha:
+                    // dst.a = src.a + (1 - src.a) * dst.a.
+                    _gl.BlendFuncSeparate(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha,
+                        BlendingFactor.One, BlendingFactor.OneMinusSrcAlpha);
+                }
+                else
+                {
+                    _gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+                }
                 _gl.DepthMask(false);
+                if (msaa)
+                {
+                    // Hair cards are cutout-like cards, not a smooth glass surface:
+                    // let the alpha choose which MSAA samples the fragment covers and
+                    // force the alpha to one in the covered samples (SampleAlphaToOne),
+                    // so the blend unit does not apply the same alpha a second time.
+                    // Without AlphaToOne, coverage and blending both attenuate the
+                    // result and the cards become more transparent, not less.
+                    _gl.Enable(EnableCap.SampleAlphaToCoverage);
+                    _gl.Enable(EnableCap.SampleAlphaToOne);
+                }
                 _ordered.Sort((a, b) =>
                 {
                     var cmp = Vector3.DistanceSquared(b.Centre, camera.Position).CompareTo(
@@ -826,6 +882,12 @@ internal sealed unsafe class Renderer : IDisposable
             foreach (var prim in pass == AlphaMode.Blend ? _ordered : _primitives)
             {
                 if (prim.AlphaMode != pass)
+                {
+                    continue;
+                }
+
+                if (coverage && pass == AlphaMode.Blend && blendMaterialPrefix is not null
+                    && !BlendMaterialMatches(prim.MaterialIndex, blendMaterialPrefix))
                 {
                     continue;
                 }
@@ -871,12 +933,24 @@ internal sealed unsafe class Renderer : IDisposable
 
             if (pass == AlphaMode.Blend)
             {
+                if (msaa)
+                {
+                    _gl.Disable(EnableCap.SampleAlphaToCoverage);
+                    _gl.Disable(EnableCap.SampleAlphaToOne);
+                }
                 _gl.DepthMask(true);
                 _gl.Disable(EnableCap.Blend);
             }
         }
 
         _gl.BindVertexArray(0);
+        _gl.ColorMask(true, true, true, true);
+    }
+
+    private bool BlendMaterialMatches(int materialIndex, string prefix)
+    {
+        return materialIndex >= 0 && materialIndex < _model.Materials.Count
+            && _model.Materials[materialIndex].Name?.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) == true;
     }
 
     private void UploadLights(IReadOnlyList<RuntimeLight> lights)

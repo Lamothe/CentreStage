@@ -98,6 +98,10 @@ internal static class FaceNeuralDemo
         uint framebuffer = 0;
         uint colourTexture = 0;
         uint depthBuffer = 0;
+        uint sweepFramebuffer = 0;
+        uint sweepColourBuffer = 0;
+        uint sweepDepthBuffer = 0;
+        var sweepSamples = 0;
         uint referenceTexture = 0;
         uint cheapTexture = 0;
         uint neuralTexture = 0;
@@ -112,6 +116,7 @@ internal static class FaceNeuralDemo
         var neuralWhole = 0.0;
         var cheapFace = 0.0;
         var neuralFace = 0.0;
+        var coverageWanted = Environment.GetEnvironmentVariable("CENTRESTAGE_HAIR_COVERAGE") == "1";
 
         try
         {
@@ -150,6 +155,54 @@ internal static class FaceNeuralDemo
                 if (status != GLEnum.FramebufferComplete)
                 {
                     throw new InvalidOperationException($"face capture framebuffer incomplete: {status}");
+                }
+
+                // Diagnostic-only MSAA target for the orbit sweep. The pinned PSNR
+                // frames above keep using the single-sample framebuffer, so they are
+                // byte-identical whether or not this exists. Enabled with
+                // CENTRESTAGE_MSAA=4 (the same opt-in as the viewer window).
+                if (int.TryParse(Environment.GetEnvironmentVariable("CENTRESTAGE_MSAA"), out var requestedSamples)
+                    && requestedSamples >= 2)
+                {
+                    var maxSamples = gl.GetInteger(GLEnum.MaxSamples);
+                    sweepSamples = Math.Min(requestedSamples, maxSamples);
+                    if (sweepSamples >= 2)
+                    {
+                        sweepColourBuffer = gl.GenRenderbuffer();
+                        gl.BindRenderbuffer(RenderbufferTarget.Renderbuffer, sweepColourBuffer);
+                        gl.RenderbufferStorageMultisample(RenderbufferTarget.Renderbuffer, (uint)sweepSamples,
+                            InternalFormat.Rgba8, (uint)size, (uint)size);
+                        sweepDepthBuffer = gl.GenRenderbuffer();
+                        gl.BindRenderbuffer(RenderbufferTarget.Renderbuffer, sweepDepthBuffer);
+                        gl.RenderbufferStorageMultisample(RenderbufferTarget.Renderbuffer, (uint)sweepSamples,
+                            InternalFormat.DepthComponent24, (uint)size, (uint)size);
+                        sweepFramebuffer = gl.GenFramebuffer();
+                        gl.BindFramebuffer(FramebufferTarget.Framebuffer, sweepFramebuffer);
+                        gl.FramebufferRenderbuffer(FramebufferTarget.Framebuffer,
+                            FramebufferAttachment.ColorAttachment0, RenderbufferTarget.Renderbuffer,
+                            sweepColourBuffer);
+                        gl.FramebufferRenderbuffer(FramebufferTarget.Framebuffer,
+                            FramebufferAttachment.DepthAttachment, RenderbufferTarget.Renderbuffer,
+                            sweepDepthBuffer);
+                        var sweepStatus = gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+                        gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+                        if (sweepStatus != GLEnum.FramebufferComplete)
+                        {
+                            Console.Error.WriteLine(
+                                $"face-neural: {sweepSamples}x sweep framebuffer incomplete: {sweepStatus}; sweep stays single-sample");
+                            gl.DeleteFramebuffer(sweepFramebuffer);
+                            gl.DeleteRenderbuffer(sweepColourBuffer);
+                            gl.DeleteRenderbuffer(sweepDepthBuffer);
+                            sweepFramebuffer = 0;
+                            sweepColourBuffer = 0;
+                            sweepDepthBuffer = 0;
+                            sweepSamples = 0;
+                        }
+                    }
+
+                    Console.WriteLine(sweepSamples >= 2
+                        ? $"face-neural: sweep MSAA target {sweepSamples}x (requested {requestedSamples}, max {maxSamples})"
+                        : $"face-neural: sweep MSAA unavailable (requested {requestedSamples}, max {maxSamples}); sweep stays single-sample");
                 }
 
                 var camera = new OrbitCamera
@@ -200,8 +253,16 @@ internal static class FaceNeuralDemo
                         var sweepCamera = new OrbitCamera { Yaw = sweepYaw, Pitch = locked.Pitch };
                         sweepCamera.SetFrameAspect(1f);
                         sweepCamera.Focus(locked.Focus, locked.Distance);
-                        var sweepRgb = Capture(fullRenderer, sweepCamera, lights, locked.Sky, locked.Ground);
+                        var sweepRgb = sweepSamples >= 2
+                            ? CaptureMultisampled(fullRenderer, sweepCamera, lights, locked.Sky, locked.Ground)
+                            : Capture(fullRenderer, sweepCamera, lights, locked.Sky, locked.Ground);
                         PreviewGl.WritePpm(Path.Combine(sweepDirectory, $"sweep-{i:D2}.ppm"), sweepRgb, size, size);
+                        if (coverageWanted)
+                        {
+                            var coverage = CaptureCoverage(fullRenderer, sweepCamera, lights, locked.Sky, locked.Ground);
+                            PreviewGl.WritePgm(Path.Combine(sweepDirectory, $"coverage-{i:D2}.pgm"),
+                                coverage, size, size);
+                        }
                     }
 
                     Console.WriteLine($"face-neural: wrote {sweepCount} sweep frames to {Path.GetFullPath(sweepDirectory)}");
@@ -249,8 +310,35 @@ internal static class FaceNeuralDemo
                     {
                         throw new InvalidOperationException($"GL error during face capture: {error}");
                     }
+                    return ReadCapturedRgb();
+                }
+
+                // Same view through the sweep's multisampled target, resolved into the
+                // single-sample colour texture first. ReadPixels cannot read a
+                // multisampled framebuffer directly.
+                byte[] CaptureMultisampled(Renderer renderer, OrbitCamera cam, RuntimeLight[] lts,
+                    Vector3 skyColour, Vector3 groundColour)
+                {
+                    gl!.Viewport(0, 0, (uint)size, (uint)size);
+                    gl.BindFramebuffer(FramebufferTarget.Framebuffer, sweepFramebuffer);
+                    renderer.Draw(cam, 1f, lts, skyColour, groundColour);
+                    gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, sweepFramebuffer);
+                    gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, framebuffer);
+                    gl.BlitFramebuffer(0, 0, size, size, 0, 0, size, size,
+                        ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
+                    var error = gl.GetError();
+                    if (error != GLEnum.NoError)
+                    {
+                        throw new InvalidOperationException($"GL error resolving the sweep MSAA frame: {error}");
+                    }
+                    gl.BindFramebuffer(FramebufferTarget.Framebuffer, framebuffer);
+                    return ReadCapturedRgb();
+                }
+
+                byte[] ReadCapturedRgb()
+                {
                     var rgba = new byte[size * size * 4];
-                    gl.ReadPixels(0, 0, (uint)size, (uint)size, PixelFormat.Rgba,
+                    gl!.ReadPixels(0, 0, (uint)size, (uint)size, PixelFormat.Rgba,
                         PixelType.UnsignedByte, rgba);
                     gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
                     var rgb = new byte[size * size * 3];
@@ -267,6 +355,46 @@ internal static class FaceNeuralDemo
                         }
                     }
                     return rgb;
+                }
+
+                // Hair-only coverage map: the alpha channel after compositing the hair
+                // material's blended primitives over the opaque depth. This is the
+                // quantity the alpha-distribution check measures; it is not shading.
+                byte[] CaptureCoverage(Renderer renderer, OrbitCamera cam, RuntimeLight[] lts,
+                    Vector3 skyColour, Vector3 groundColour)
+                {
+                    gl!.Viewport(0, 0, (uint)size, (uint)size);
+                    var target = sweepSamples >= 2 ? sweepFramebuffer : framebuffer;
+                    gl.BindFramebuffer(FramebufferTarget.Framebuffer, target);
+                    renderer.DrawCoverage(cam, 1f, lts, skyColour, groundColour,
+                        pose: null, blendMaterialPrefix: "hair");
+                    if (sweepSamples >= 2)
+                    {
+                        gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, sweepFramebuffer);
+                        gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, framebuffer);
+                        gl.BlitFramebuffer(0, 0, size, size, 0, 0, size, size,
+                            ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
+                        var resolveError = gl.GetError();
+                        if (resolveError != GLEnum.NoError)
+                        {
+                            throw new InvalidOperationException(
+                                $"GL error resolving the coverage frame: {resolveError}");
+                        }
+                        gl.BindFramebuffer(FramebufferTarget.Framebuffer, framebuffer);
+                    }
+                    var rgba = new byte[size * size * 4];
+                    gl.ReadPixels(0, 0, (uint)size, (uint)size, PixelFormat.Rgba,
+                        PixelType.UnsignedByte, rgba);
+                    gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+                    var alpha = new byte[size * size];
+                    for (var row = 0; row < size; row++)
+                    {
+                        for (var x = 0; x < size; x++)
+                        {
+                            alpha[row * size + x] = rgba[((size - 1 - row) * size + x) * 4 + 3];
+                        }
+                    }
+                    return alpha;
                 }
             };
 
@@ -474,6 +602,9 @@ internal static class FaceNeuralDemo
                     if (cheapTexture != 0) gl.DeleteTexture(cheapTexture);
                     if (referenceTexture != 0) gl.DeleteTexture(referenceTexture);
                     if (framebuffer != 0) gl.DeleteFramebuffer(framebuffer);
+                    if (sweepFramebuffer != 0) gl.DeleteFramebuffer(sweepFramebuffer);
+                    if (sweepColourBuffer != 0) gl.DeleteRenderbuffer(sweepColourBuffer);
+                    if (sweepDepthBuffer != 0) gl.DeleteRenderbuffer(sweepDepthBuffer);
                     if (colourTexture != 0) gl.DeleteTexture(colourTexture);
                     if (depthBuffer != 0) gl.DeleteRenderbuffer(depthBuffer);
                 }

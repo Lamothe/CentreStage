@@ -62,6 +62,45 @@ Diagnostic env vars: `CENTRESTAGE_WIREFRAME=1` (no culling/depth), `CENTRESTAGE_
 `CENTRESTAGE_STATUS_TEST=1` (with `--capture`: draws the status overlay after the model to
 verify overlay text survives the renderer's GL state).
 
+### Multisampling and alpha-to-coverage (opt-in, measured as a regression)
+
+`CENTRESTAGE_MSAA=4` requests a 4-sample window framebuffer (clamped to
+`GL_MAX_SAMPLES`; below 2 it is ignored) and enables `GL_SAMPLE_ALPHA_TO_COVERAGE`
+plus `GL_SAMPLE_ALPHA_TO_ONE` for the blend pass only. It defaults **off** and the
+current single-sample path is unchanged. `--capture`, the viewer and the
+`CENTRESTAGE_FACE_SWEEP` path all honour it; the sweep renders through its own
+multisampled FBO and blits into the existing single-sample texture, because
+`ReadPixels` cannot read a multisampled buffer. The renderer keys
+alpha-to-coverage off `glGetIntegerv(GL_SAMPLES)` of the *bound* framebuffer, so
+`--scene-neural-demo`, `--face-neural-demo` and the DLSS seam — which render into
+their own single-sample RGBA8 FBOs — keep the exact blending they were pinned
+against; the pinned frames stay byte-identical (verified with `cmp`, and the PSNRs
+reproduce to the decimal).
+
+`CENTRESTAGE_HAIR_COVERAGE=1` (with `--face-neural-demo` and a dump directory)
+additionally writes `coverage-NN.pgm`: the alpha channel left by the hair
+material's blended primitives composited over the opaque depth, per sweep yaw.
+It is a measurement aid, not shading.
+
+Measured on `Teen_Kitty_rigged.glb`, 12 yaws, 640×640
+(alpha = hair-only accumulated opacity; "bright in hair" = skin-like pixels
+inside the eroded hair silhouette):
+
+| configuration | hair pixels with alpha < 0.95 | p10 | bright in hair |
+|---|---|---|---|
+| single-sample, current default | 14.2% mean (6.0–27.2%) | 0.51–0.99 | 0.78% mean |
+| 4x MSAA, blending only (no A2C) | 14.9% mean (6.7–28.6%) | 0.46–0.99 | — |
+| 4x MSAA + alpha-to-coverage | 59.0% mean (37.6–79.2%) | 0.50 | 1.46% mean |
+
+Alpha-to-coverage **does not fix the scalp-through-hair defect on this asset and
+makes it measurably worse**: the hair atlas is genuinely semi-transparent
+(mean alpha 0.36, ~0.42 held through the mips), so turning per-fragment alpha into
+4-level sample coverage replaces smooth layer accumulation with dither, and
+samples no card covers reveal the skull. The flag is kept for evaluation, off by
+default. The remaining lever is the asset's opacity itself (alpha test for solid
+strand interiors ahead of the sorted blend remainder, or a painted hairline),
+not the resolve path.
+
 ## Desktop integration (GNOME) — open from Files
 
 `linux/install.sh` publishes the viewer to `~/.local/share/centrestage`, installs a

@@ -24,8 +24,8 @@ Capture rejects non-empty diagnostic environment variables: `CENTRESTAGE_SOLID`,
 `CENTRESTAGE_WIREFRAME`, `CENTRESTAGE_STATUS_TEST`, `CENTRESTAGE_AUTO_CLOSE_MS`,
 `CENTRESTAGE_SYNTH_CLICK`, `CENTRESTAGE_SYNTH_MENU`,
 `CENTRESTAGE_SYNTH_MENU_SHOT`, `CENTRESTAGE_CTL_FIFO`,
-`CENTRESTAGE_DLSS_SYNTHETIC`, `CENTRESTAGE_DLSS_EXTREME`, and
-`CENTRESTAGE_DLSS_FAULT`. It creates an invisible window, does not create an
+`CENTRESTAGE_DLSS_SYNTHETIC`, `CENTRESTAGE_DLSS_EXTREME`, `CENTRESTAGE_DLSS_FAULT`,
+`CENTRESTAGE_MSAA`, and `CENTRESTAGE_HAIR_COVERAGE`. It creates an invisible window, does not create an
 input context or inject input, and does not invoke the DLSS seam. It refuses
 an unexpected framebuffer size rather than silently scaling.
 

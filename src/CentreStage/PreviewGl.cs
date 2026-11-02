@@ -132,4 +132,18 @@ internal static class PreviewGl
         writer.Flush();
         stream.Write(rgb);
     }
+
+    /// <summary>Binary PGM (P5) of a top-down 8-bit single-channel frame (coverage maps).</summary>
+    internal static void WritePgm(string path, byte[] gray, int width, int height)
+    {
+        if (gray.Length != width * height)
+        {
+            throw new ArgumentException("gray length does not match the given dimensions");
+        }
+        using var stream = File.Create(path);
+        using var writer = new StreamWriter(stream, System.Text.Encoding.ASCII, leaveOpen: true);
+        writer.Write($"P5\n{width} {height}\n255\n");
+        writer.Flush();
+        stream.Write(gray);
+    }
 }

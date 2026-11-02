@@ -184,6 +184,31 @@ internal static class FaceNeuralDemo
                     FaceWidth, FaceHeight);
                 neuralFace = PreviewGl.PsnrRegion(neuralRgb, referenceRgb, size, size, FaceX, FaceY,
                     FaceWidth, FaceHeight);
+                // Diagnostic orbit sweep: renders the same asset and light from N evenly
+                // spaced yaws and dumps each frame, so a view-dependent defect can be
+                // found without an operator at the window. Opt-in and inert otherwise.
+                if (int.TryParse(Environment.GetEnvironmentVariable("CENTRESTAGE_FACE_SWEEP"), out var sweepCount)
+                    && sweepCount > 0)
+                {
+                    var sweepDirectory = Environment.GetEnvironmentVariable("CENTRESTAGE_SCENE_DUMP") is { Length: > 0 } sweepDump
+                        ? sweepDump
+                        : Path.Combine(Path.GetTempPath(), "centrestage-face-sweep");
+                    Directory.CreateDirectory(sweepDirectory);
+                    for (var i = 0; i < sweepCount; i++)
+                    {
+                        var sweepYaw = MathF.Tau * i / sweepCount;
+                        var sweepCamera = new OrbitCamera { Yaw = sweepYaw, Pitch = locked.Pitch };
+                        sweepCamera.SetFrameAspect(1f);
+                        sweepCamera.Focus(locked.Focus, locked.Distance);
+                        var sweepRgb = Capture(fullRenderer, sweepCamera, lights, locked.Sky, locked.Ground);
+                        PreviewGl.WritePpm(Path.Combine(sweepDirectory, $"sweep-{i:D2}.ppm"), sweepRgb, size, size);
+                    }
+
+                    Console.WriteLine($"face-neural: wrote {sweepCount} sweep frames to {Path.GetFullPath(sweepDirectory)}");
+                    window.Close();
+                    return;
+                }
+
                 if (Environment.GetEnvironmentVariable("CENTRESTAGE_SCENE_DUMP") is { Length: > 0 } dumpDirectory)
                 {
                     Directory.CreateDirectory(dumpDirectory);

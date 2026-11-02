@@ -289,13 +289,19 @@ internal static class Program
     /// path. The renderer keys alpha-to-coverage off the framebuffer's actual
     /// sample count, so a driver that cannot supply the request falls back to the
     /// current behaviour rather than failing.
+    ///
+    /// Disabled must be <b>0</b>, not 1: GLFW treats zero as "no multisampling" and
+    /// Mesa honours a hint of one by returning a two-sample framebuffer, which made
+    /// the renderer's <c>samples &gt; 1</c> test enable alpha-to-coverage on the
+    /// default path. Measured: unset and <c>CENTRESTAGE_MSAA=2</c> produced
+    /// byte-identical captures, while both differed from the pre-change build.
     /// </summary>
     private static int RequestedMsaaSamples()
     {
         return int.TryParse(Environment.GetEnvironmentVariable("CENTRESTAGE_MSAA"), out var samples)
             && samples >= 2
             ? Math.Min(samples, 8)
-            : 1;
+            : 0;
     }
 
     private static void LogMsaa(GL gl, int requested, string label)

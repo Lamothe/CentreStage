@@ -97,9 +97,61 @@ makes it measurably worse**: the hair atlas is genuinely semi-transparent
 (mean alpha 0.36, ~0.42 held through the mips), so turning per-fragment alpha into
 4-level sample coverage replaces smooth layer accumulation with dither, and
 samples no card covers reveal the skull. The flag is kept for evaluation, off by
-default. The remaining lever is the asset's opacity itself (alpha test for solid
-strand interiors ahead of the sorted blend remainder, or a painted hairline),
-not the resolve path.
+default.
+
+### Hair opacity (opt-in)
+
+Two levers on the same axis — how much of what is behind a hair card reaches the
+screen. Both are **off by default** and both are verified to leave the current
+path byte-identical (see the numbers below), so the pinned demo frames and the
+PSNRs they print are unaffected.
+
+- `CENTRESTAGE_BLEND_CUTOUT=<alpha>` (with `CENTRESTAGE_BLEND_CUTOUT_MATERIAL`,
+  default `hair`) draws fragments of that blend material family at or above the
+  cutoff as **opaque, depth-writing geometry in a prepass** before the sorted
+  blend pass. Dense strand interiors therefore occlude what is behind them, and
+  the genuinely thin remainder still blends in order. Depth de-duplicates: the
+  same fragment in the blend pass sits at its own depth, fails `GL_LESS`, and is
+  not composited twice — so no shader variant is involved.
+- `CENTRESTAGE_BLEND_BOOST=<k>` remaps blend alpha in the shader to
+  `1-(1-a)^k`, folding *k* cards' worth of coverage into each fragment, for
+  `CENTRESTAGE_BLEND_BOOST_MATERIAL` (default `hair`). `k` of 1, or outside
+  `(1, 8]`, is ignored. Because `pow(1-a, 1)` is not guaranteed to be exactly
+  `1-a`, the shader guards the remap with `uAlphaBoost > 1.0` and never evaluates
+  it on the default path.
+
+Both levers can be enabled together; the measurement below reports the
+combination as well as each one alone.
+
+`CENTRESTAGE_HIDE_BLEND=<name-prefix>` skips a blend material family entirely. It
+is a measurement aid only: it produces the "no hair" reference used to separate
+"the hair is too transparent" from "the hair does not cover that part of the
+head".
+
+Measured on `Teen_Kitty_rigged.glb`, default framing, 1280×800, over the hair
+footprint (15,201 px, defined as wherever a near-opaque render differs from the
+default). Lower mean luma means less of the bright scalp behind the hair is
+reaching the screen:
+
+| configuration | mean luma | p10 | edge energy |
+|---|---|---|---|
+| default | 42.10 | 24.7 | 8.13 |
+| cutout 0.5 | 40.12 | 18.3 | — |
+| cutout 0.4 | 39.74 | 17.3 | 10.21 |
+| boost 3 | 39.60 | 17.7 | 10.91 |
+| cutout 0.4 + boost 3 | 39.55 | 18.0 | 10.03 |
+| boost 8 (near-opaque reference) | 39.12 | 15.0 | 12.09 |
+
+The combination lands within 0.43 luma levels of the near-opaque reference, so it
+removes essentially all of the transparency bleed, and edge energy *rises*
+(8.13 → 10.03): the strands gain contrast, they are not flattened into a mask.
+
+Scope, measured rather than assumed: in the scalp band above the face only
+**6.6%** of the bright surface is uncovered by any hair fragment, so transparency
+is the dominant mechanism here and an alpha-space fix is the right lever. (An
+earlier pass over the whole head reported 40%; that mask included the face, where
+of course no hair is drawn — the 6.6% figure is the one that applies.) Unverified
+at other orbit angles: the 12-yaw sweep was not re-run for this change.
 
 ## Desktop integration (GNOME) — open from Files
 

@@ -45,6 +45,17 @@ internal sealed unsafe class Renderer : IDisposable
     private float[] _depthScratch = Array.Empty<float>();
     private ulong[] _sortKeys = Array.Empty<ulong>();
 
+    // Optional alpha-test prepass for one blend material family (see
+    // DrawBlendCutoutPrepass). Cutoff 0 keeps the pre-change single-pass path exactly.
+    private readonly float _blendCutoutCutoff;
+    private readonly string _blendCutoutPrefix;
+    private readonly float _blendOpacityBoost;
+    private readonly string _blendOpacityPrefix;
+
+    // Measurement aid: suppress one blend material family entirely, to separate "the
+    // hair is too transparent" from "the hair does not cover that part of the head".
+    private readonly string? _hiddenBlendPrefix;
+
     private static readonly int[] SamplerWraps = { 10497, 33071, 33648 }; // repeat, clamp, mirrored
 
     private sealed class GlPrimitive
@@ -76,6 +87,43 @@ internal sealed unsafe class Renderer : IDisposable
     {
         _gl = gl;
         _model = model;
+
+        // Opt-in alpha-test prepass for one blend material family. Unset, or a cutoff
+        // outside (0,1), leaves the pre-change single-pass blend path untouched.
+        _blendCutoutCutoff =
+            float.TryParse(Environment.GetEnvironmentVariable("CENTRESTAGE_BLEND_CUTOUT"),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var cutoutCutoff)
+            && cutoutCutoff > 0f && cutoutCutoff < 1f
+                ? cutoutCutoff
+                : 0f;
+        _blendCutoutPrefix =
+            Environment.GetEnvironmentVariable("CENTRESTAGE_BLEND_CUTOUT_MATERIAL") ?? "hair";
+
+        // Opt-in opacity remap for one blend material family: alpha' = 1-(1-alpha)^k,
+        // which folds k cards' worth of coverage into each fragment. k of 1 (or a value
+        // outside (1, 8]) leaves the shader's default path untouched.
+        _blendOpacityBoost =
+            float.TryParse(Environment.GetEnvironmentVariable("CENTRESTAGE_BLEND_BOOST"),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var boost)
+            && boost > 1f && boost <= 8f
+                ? boost
+                : 1f;
+        _blendOpacityPrefix =
+            Environment.GetEnvironmentVariable("CENTRESTAGE_BLEND_BOOST_MATERIAL") ?? "hair";
+        _hiddenBlendPrefix = Environment.GetEnvironmentVariable("CENTRESTAGE_HIDE_BLEND");
+        if (_blendOpacityBoost > 1f)
+        {
+            Console.WriteLine($"  blend boost: alpha remapped by 1-(1-a)^{_blendOpacityBoost:0.0} "
+                + $"for materials named '{_blendOpacityPrefix}*'");
+        }
+        if (_blendCutoutCutoff > 0f)
+        {
+            Console.WriteLine($"  blend cutout: alpha >= {_blendCutoutCutoff:0.00} for materials named "
+                + $"'{_blendCutoutPrefix}*' draws opaque before the blend pass");
+        }
+
         _program = BuildProgram(cheapScene);
         _textureIds = new int[model.Textures.Count];
         Array.Fill(_textureIds, -1);
@@ -846,6 +894,11 @@ internal sealed unsafe class Renderer : IDisposable
         {
             if (pass == AlphaMode.Blend)
             {
+                if (!coverage && _blendCutoutCutoff > 0f)
+                {
+                    DrawBlendCutoutPrepass(pose, view);
+                }
+
                 _gl.Enable(EnableCap.Blend);
                 if (coverage)
                 {
@@ -892,43 +945,13 @@ internal sealed unsafe class Renderer : IDisposable
                     continue;
                 }
 
-                ApplyMaterial(prim.MaterialIndex);
-
-                var model = prim.World;
-                var skinned = false;
-                if (pose is not null)
+                if (pass == AlphaMode.Blend && _hiddenBlendPrefix is not null
+                    && BlendMaterialMatches(prim.MaterialIndex, _hiddenBlendPrefix))
                 {
-                    if (prim.GpuSkinned && prim.SkinIndex >= 0)
-                    {
-                        UploadJointPalette(pose, prim.SkinIndex);
-                        skinned = true;
-                        model = Matrix4x4.Identity; // pose lives in the palette
-                    }
-                    else
-                    {
-                        model = pose.World(prim.NodeIndex);
-                    }
+                    continue;
                 }
 
-                SetMat4("uModel", model);
-                SetInt("uSkinned", skinned ? 1 : 0);
-
-                if (pass == AlphaMode.Blend && sortDirty)
-                {
-                    UpdateBlendSort(prim, view, pose);
-                }
-
-                if (prim.DoubleSided)
-                {
-                    _gl.Disable(EnableCap.CullFace);
-                }
-                else
-                {
-                    _gl.Enable(EnableCap.CullFace);
-                }
-
-                _gl.BindVertexArray(prim.Vao);
-                _gl.DrawElements(PrimitiveType.Triangles, (uint)prim.IndexCount, DrawElementsType.UnsignedInt, null);
+                DrawPrimitive(prim, pose, view, sortIsDirty: pass == AlphaMode.Blend && sortDirty);
             }
 
             if (pass == AlphaMode.Blend)
@@ -951,6 +974,91 @@ internal sealed unsafe class Renderer : IDisposable
     {
         return materialIndex >= 0 && materialIndex < _model.Materials.Count
             && _model.Materials[materialIndex].Name?.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    /// <summary>
+    /// Draws the named blend material family's dense strand interiors as depth-writing
+    /// opaque geometry, before the sorted blend pass runs.
+    ///
+    /// The hair atlas is alpha-painted: 30% of its texels are fully transparent gaps and
+    /// the rest is spread across the range (only 36% of texels reach 0.5), so a stack of
+    /// cards composites to a mean opacity well under one and the bald scalp UV beneath
+    /// shows through. Splitting the material at a cutoff fixes that where the cards are
+    /// dense — those fragments become opaque and write depth, so nothing behind them can
+    /// bleed — while the genuinely thin remainder still blends, in sorted order, in the
+    /// pass that follows.
+    ///
+    /// Depth does the de-duplication: a fragment written here sits at exactly its own
+    /// depth, so the same fragment in the blend pass fails <c>GL_LESS</c> and is not
+    /// composited a second time. No shader variant and no second alpha test are needed.
+    /// </summary>
+    private void DrawBlendCutoutPrepass(ScenePose? pose, Matrix4x4 view)
+    {
+        _gl.Disable(EnableCap.Blend);
+        _gl.DepthMask(true);
+        _gl.Enable(EnableCap.DepthTest);
+        _gl.DepthFunc(DepthFunction.Less);
+
+        foreach (var prim in _ordered)
+        {
+            if (prim.AlphaMode != AlphaMode.Blend
+                || !BlendMaterialMatches(prim.MaterialIndex, _blendCutoutPrefix))
+            {
+                continue;
+            }
+
+            // DrawPrimitive applies the material, so the mask override has to survive
+            // that call: pass it in rather than setting it here.
+            DrawPrimitive(prim, pose, view, sortIsDirty: false,
+                alphaModeOverride: (int)AlphaMode.Mask, alphaCutoff: _blendCutoutCutoff);
+        }
+    }
+
+    private void DrawPrimitive(GlPrimitive prim, ScenePose? pose, Matrix4x4 view, bool sortIsDirty,
+        int alphaModeOverride = -1, float alphaCutoff = 0f)
+    {
+        ApplyMaterial(prim.MaterialIndex);
+        if (alphaModeOverride >= 0)
+        {
+            SetInt("uAlphaMode", alphaModeOverride);
+            SetFloat("uAlphaCutoff", alphaCutoff);
+        }
+
+        var model = prim.World;
+        var skinned = false;
+        if (pose is not null)
+        {
+            if (prim.GpuSkinned && prim.SkinIndex >= 0)
+            {
+                UploadJointPalette(pose, prim.SkinIndex);
+                skinned = true;
+                model = Matrix4x4.Identity; // pose lives in the palette
+            }
+            else
+            {
+                model = pose.World(prim.NodeIndex);
+            }
+        }
+
+        SetMat4("uModel", model);
+        SetInt("uSkinned", skinned ? 1 : 0);
+
+        if (sortIsDirty)
+        {
+            UpdateBlendSort(prim, view, pose);
+        }
+
+        if (prim.DoubleSided)
+        {
+            _gl.Disable(EnableCap.CullFace);
+        }
+        else
+        {
+            _gl.Enable(EnableCap.CullFace);
+        }
+
+        _gl.BindVertexArray(prim.Vao);
+        _gl.DrawElements(PrimitiveType.Triangles, (uint)prim.IndexCount, DrawElementsType.UnsignedInt, null);
     }
 
     private void UploadLights(IReadOnlyList<RuntimeLight> lights)
@@ -1034,6 +1142,12 @@ internal sealed unsafe class Renderer : IDisposable
         SetFloat("uOcclusionStrength", m?.OcclusionStrength ?? 1f);
         SetInt("uAlphaMode", (int)(m?.AlphaMode ?? AlphaMode.Opaque));
         SetFloat("uAlphaCutoff", m?.AlphaCutoff ?? 0.5f);
+        // The shader only consults this when uAlphaMode == 2, so the cutout prepass
+        // (which overrides the mode to mask) is unaffected.
+        SetFloat("uAlphaBoost",
+            _blendOpacityBoost > 1f && BlendMaterialMatches(materialIndex, _blendOpacityPrefix)
+                ? _blendOpacityBoost
+                : 1f);
         SetInt("uUnlit", m?.Unlit == true ? 1 : 0);
         SetInt("uSpecularGlossiness", sg ? 1 : 0);
         SetFloat("uSgGlossinessFactor", m?.SgGlossinessFactor ?? 1f);

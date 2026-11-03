@@ -130,6 +130,7 @@ internal static class ShaderSources
         uniform float uEmissiveStrength;
         uniform int uAlphaMode;
         uniform float uAlphaCutoff;
+        uniform float uAlphaBoost;   // 1 = unchanged; >1 thickens blend materials
         uniform bool uUnlit;
         uniform bool uSpecularGlossiness;
 
@@ -178,6 +179,15 @@ internal static class ShaderSources
             if (uAlphaMode == 1 && base.a < uAlphaCutoff)
             {
                 discard;
+            }
+
+            // Blend materials only: 1-(1-a)^k folds k cards' worth of opacity into each
+            // fragment. Guarded by uAlphaBoost > 1 so the default path never evaluates
+            // it and stays bit-identical; pow(1-a, 1.0) is not guaranteed to be exactly
+            // 1-a on every driver.
+            if (uAlphaMode == 2 && uAlphaBoost > 1.0)
+            {
+                base.a = 1.0 - pow(1.0 - base.a, uAlphaBoost);
             }
 
             vec3 n = normalize(vNormal);
@@ -286,6 +296,7 @@ internal static class ShaderSources
         uniform float uOcclusionStrength;
         uniform int uAlphaMode;               // 0 opaque, 1 mask, 2 blend
         uniform float uAlphaCutoff;
+        uniform float uAlphaBoost;            // 1 = unchanged; >1 thickens blend materials
         uniform bool uUnlit;
         uniform bool uSpecularGlossiness;
         uniform float uSgGlossinessFactor;
@@ -418,6 +429,15 @@ internal static class ShaderSources
             if (uAlphaMode == 1 && base.a < uAlphaCutoff)
             {
                 discard;
+            }
+
+            // Blend materials only: 1-(1-a)^k folds k cards' worth of opacity into each
+            // fragment. Guarded by uAlphaBoost > 1 so the default path never evaluates
+            // it and stays bit-identical; pow(1-a, 1.0) is not guaranteed to be exactly
+            // 1-a on every driver.
+            if (uAlphaMode == 2 && uAlphaBoost > 1.0)
+            {
+                base.a = 1.0 - pow(1.0 - base.a, uAlphaBoost);
             }
 
             vec3 n = uHasNormalTex != 0

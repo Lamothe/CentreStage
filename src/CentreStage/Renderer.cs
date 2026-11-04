@@ -82,7 +82,18 @@ internal sealed unsafe class Renderer : IDisposable
 
     /// <summary>Pinned-evidence renderers keep the pre-change shading path outright.</summary>
     private readonly bool _pinnedEvidence;
-    private readonly PresentationSettings _presentation;
+    private PresentationSettings _presentation;
+    private SubsurfacePass? _subsurface;
+    public PresentationSettings Presentation => _presentation;
+
+    public void SetPresentation(PresentationSettings settings)
+    {
+        if (_pinnedEvidence)
+        {
+            throw new InvalidOperationException("Pinned renderers cannot change presentation");
+        }
+        _presentation = settings;
+    }
 
     // Measurement aid: skip transmissive primitives entirely, to see what a glass surface
     // is covering (an eye under a cornea, a room behind a window).
@@ -144,7 +155,7 @@ internal sealed unsafe class Renderer : IDisposable
         if (!pinnedEvidence)
         {
             Console.WriteLine(_presentation.Enabled
-                ? FormattableString.Invariant($"  presentation: studio intensity={_presentation.EnvironmentIntensity:0.###}, rotation={_presentation.EnvironmentRotation:0.###}deg, fallbackKey={_presentation.FallbackLightIntensity:0.###}, exposure={_presentation.Exposure:0.###} stops, brightness={_presentation.Brightness:0.###}, contrast={_presentation.Contrast:0.###}, saturation={_presentation.Saturation:0.###}, specularAA={_presentation.SpecularAntialiasing:0.###}, trilinear={_presentation.TrilinearFiltering}, diffusion={_presentation.SkinDiffusion:0.###} ({_presentation.SkinFamilies})")
+                ? FormattableString.Invariant($"  presentation: studio intensity={_presentation.EnvironmentIntensity:0.###}, rotation={_presentation.EnvironmentRotation:0.###}deg, fallbackKey={_presentation.FallbackLightIntensity:0.###}, exposure={_presentation.Exposure:0.###} stops, brightness={_presentation.Brightness:0.###}, contrast={_presentation.Contrast:0.###}, saturation={_presentation.Saturation:0.###}, specularAA={_presentation.SpecularAntialiasing:0.###}, trilinear={_presentation.TrilinearFiltering}, sss={_presentation.SubsurfaceScattering:0.###}, radius={_presentation.SubsurfaceRadius:0.####}, diffusion={_presentation.SkinDiffusion:0.###} ({_presentation.SkinFamilies})")
                 : "  presentation: legacy hemispheric lighting/tones");
         }
 
@@ -1078,10 +1089,32 @@ internal sealed unsafe class Renderer : IDisposable
         var deferTransmission = !_legacyTransmission && !_pinnedEvidence && _hasTransmissive && !coverage;
         var skipTransmission = deferTransmission || _hideTransmissive;
 
+        var sssActive = _presentation.Enabled && !_pinnedEvidence && !coverage
+            && _presentation.SubsurfaceScattering > 0f;
+        if (sssActive)
+        {
+            _subsurface ??= new SubsurfacePass(_gl);
+            _subsurface.Begin();
+            SetInt("uSssCapture", 1);
+        }
+        else
+        {
+            SetInt("uSssCapture", 0);
+        }
+
         foreach (var pass in new[] { AlphaMode.Opaque, AlphaMode.Blend })
         {
             if (pass == AlphaMode.Blend)
             {
+                if (sssActive)
+                {
+                    _subsurface!.Resolve(camera, _presentation, Vector3.Distance(Bounds.min, Bounds.max));
+                    _gl.UseProgram(_program);
+                    SetInt("uSssCapture", 0);
+                    _gl.Enable(EnableCap.DepthTest);
+                    _gl.DepthFunc(DepthFunction.Lequal);
+                    _gl.DepthMask(true);
+                }
                 if (deferTransmission && !_hideTransmissive)
                 {
                     DrawTransmissivePass(pose, view);
@@ -1454,6 +1487,9 @@ internal sealed unsafe class Renderer : IDisposable
         var baseColorFactor = sg ? m!.SgDiffuseFactor : (m?.BaseColorFactor ?? Vector4.One);
         var baseColorTexture = sg ? m!.SgDiffuseTexture : m?.BaseColorTexture;
 
+        var skin = BlendMaterialFamily.Matches(m?.Name, _presentation.SkinFamilies);
+        SetFloat("uSssMaterial", skin && m?.AlphaMode != AlphaMode.Blend
+            && m?.Unlit != true && (m?.TransmissionFactor ?? 0f) == 0f ? 1f : 0f);
         SetVec4("uBaseColorFactor", baseColorFactor);
         SetFloat("uMetallicFactor", m?.MetallicFactor ?? 1f);
         SetFloat("uRoughnessFactor", m?.RoughnessFactor ?? 1f);
@@ -1625,6 +1661,7 @@ internal sealed unsafe class Renderer : IDisposable
             _gl.DeleteFramebuffer(_sceneFbo);
         }
 
+        _subsurface?.Dispose();
         _gl.DeleteProgram(_program);
     }
 }

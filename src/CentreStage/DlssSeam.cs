@@ -42,6 +42,7 @@ internal sealed class DlssSeam : IDisposable
     private State _state = State.Idle;
     private string? _failure;
     private readonly Stopwatch _evaluateClock = new();
+    private bool _discardResult;
     private Task<(Dlss5Status Status, (string Name, byte[] Buf)[] Views, double Seconds)>? _worker;
     private double _lastSeconds;
     private double _presentationSeconds;
@@ -378,6 +379,16 @@ internal sealed class DlssSeam : IDisposable
         }
     }
 
+    /// <summary>Invalidate captured lighting, including an in-flight result.</summary>
+    public void InvalidateAppearance()
+    {
+        if (_state == State.Processing)
+        {
+            _discardResult = true;
+        }
+        Release();
+    }
+
     /// <summary>
     /// True while a frame is being evaluated: teardown must not enter the
     /// closing stage (whose GL teardown blocks) until it completes.
@@ -488,6 +499,7 @@ internal sealed class DlssSeam : IDisposable
         if (_capturePending && _pipeline is not null)
         {
             _capturePending = false;
+            _discardResult = false;
             _stage.EnsureCaptureSize(_captureW, _captureH);
             _stage.BeginCapture();
             drawScene();
@@ -594,6 +606,13 @@ internal sealed class DlssSeam : IDisposable
                 _lastSeconds = evaluateSeconds;
                 _presentationSeconds = _evaluateClock.Elapsed.TotalSeconds;
                 _worker = null;
+                if (_discardResult)
+                {
+                    _discardResult = false;
+                    _state = State.Idle;
+                    Console.WriteLine("dlss: discarded result captured before appearance changed");
+                    return false;
+                }
                 if (status != Dlss5Status.Ok)
                 {
                     _state = State.Failed;

@@ -147,6 +147,30 @@ internal sealed class StatusOverlay : IDisposable
     }
 
     /// <summary>
+    /// Batches a panel using the existing text atlas and rectangle primitives.
+    /// Coordinates passed to DrawText/FillRect are framebuffer pixels.
+    /// </summary>
+    public void DrawPanel(int width, int height, Action<StatusOverlay> draw)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+        _width = width;
+        _height = height;
+        _vertsUsed = 0;
+        try
+        {
+            draw(this);
+            Flush();
+        }
+        finally
+        {
+            _vertsUsed = 0;
+        }
+    }
+
+    /// <summary>
     /// Draws one line of text at pixel coordinates: x is the left edge, y the top
     /// of the line, size the em height in pixels.
     /// </summary>

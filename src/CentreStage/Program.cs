@@ -203,6 +203,7 @@ internal static class Program
         Console.WriteLine("       CentreStage <snapshot.glb> --face-neural-demo <face-model.pt>");
         Console.WriteLine("       CentreStage <model.glb> --capture out.png [--frames N]");
         Console.WriteLine("       CentreStage <model.glb> --dlss-demo outdir   (unattended: live + processed evidence)");
+        Console.WriteLine("viewer: F8 toggles appearance controls (lighting, skin scattering and colour)");
         Console.WriteLine("viewer: F9 processes one frame through the dlss5-linux native host (frame-by-frame,");
         Console.WriteLine("        not real-time; the demo report records the transform label (\"not DLSS5 -");
         Console.WriteLine("        demonstration transform with real weights\" or \"not DLSS5 - classical");
@@ -353,22 +354,7 @@ internal static class Program
             camera.SetFrameAspect(1280f / 800f);
             camera.FrameBounds(renderer.Bounds.min, renderer.Bounds.max);
 
-            // Evidence capture at a fixed pose: CENTRESTAGE_CAMERA="x,y,z,distance,yawDeg,pitchDeg"
-            // overrides the bounding-box fit, so two builds can be compared on exactly the
-            // same view of a detail the fit cannot reach (an eye, a fitting).
-            if (Environment.GetEnvironmentVariable("CENTRESTAGE_CAMERA") is { Length: > 0 } cameraText
-                && cameraText.Split(',') is [var tx, var ty, var tz, var dist, var yaw, var pitch]
-                && float.TryParse(tx, NumberStyles.Float, CultureInfo.InvariantCulture, out var cx)
-                && float.TryParse(ty, NumberStyles.Float, CultureInfo.InvariantCulture, out var cy)
-                && float.TryParse(tz, NumberStyles.Float, CultureInfo.InvariantCulture, out var cz)
-                && float.TryParse(dist, NumberStyles.Float, CultureInfo.InvariantCulture, out var cd)
-                && float.TryParse(yaw, NumberStyles.Float, CultureInfo.InvariantCulture, out var cyaw)
-                && float.TryParse(pitch, NumberStyles.Float, CultureInfo.InvariantCulture, out var cpitch))
-            {
-                camera.Focus(new Vector3(cx, cy, cz), cd);
-                camera.Yaw = cyaw * MathF.PI / 180f;
-                camera.Pitch = cpitch * MathF.PI / 180f;
-            }
+            ApplyCameraOverride(camera);
 
             Console.WriteLine($"  bounds: ({renderer.Bounds.min:F2}) .. ({renderer.Bounds.max:F2})");
             Console.WriteLine($"  camera: pos=({camera.Position:F2}) dist={camera.Distance:F2}");
@@ -430,6 +416,8 @@ internal static class Program
                 gl.ReadPixels(0, 0, w, h, PixelFormat.Rgba, PixelType.UnsignedByte, p);
             }
 
+            ReportGlErrors(gl);
+
             // GL reads bottom-up; PNG is top-down.
             var rowBytes = (int)(w * 4);
             var flipped = new byte[pixels.Length];
@@ -459,6 +447,45 @@ internal static class Program
 
         window.Run();
         window.Dispose();
+    }
+
+    private static void ReportGlErrors(GL gl)
+    {
+        if (Environment.GetEnvironmentVariable("CENTRESTAGE_GL_CHECK") != "1")
+        {
+            return;
+        }
+        for (var count = 0; count < 16; count++)
+        {
+            var error = gl.GetError();
+            if (error == GLEnum.NoError)
+            {
+                break;
+            }
+            Console.Error.WriteLine($"error: GL {error}");
+            Environment.ExitCode = 2;
+        }
+    }
+
+    private static void ApplyCameraOverride(OrbitCamera camera)
+    {
+            // Fixed-pose diagnostics: CENTRESTAGE_CAMERA="x,y,z,distance,yawDeg,pitchDeg"
+            // overrides the bounding-box fit, so two builds can be compared on exactly the
+            // same view of a detail the fit cannot reach (an eye, a fitting).
+            if (Environment.GetEnvironmentVariable("CENTRESTAGE_CAMERA") is { Length: > 0 } cameraText
+                && cameraText.Split(',') is [var tx, var ty, var tz, var dist, var yaw, var pitch]
+                && float.TryParse(tx, NumberStyles.Float, CultureInfo.InvariantCulture, out var cx)
+                && float.TryParse(ty, NumberStyles.Float, CultureInfo.InvariantCulture, out var cy)
+                && float.TryParse(tz, NumberStyles.Float, CultureInfo.InvariantCulture, out var cz)
+                && float.TryParse(dist, NumberStyles.Float, CultureInfo.InvariantCulture, out var cd)
+                && float.TryParse(yaw, NumberStyles.Float, CultureInfo.InvariantCulture, out var cyaw)
+                && float.TryParse(pitch, NumberStyles.Float, CultureInfo.InvariantCulture, out var cpitch))
+            {
+                camera.Focus(new Vector3(cx, cy, cz), cd);
+                camera.Yaw = cyaw * MathF.PI / 180f;
+                camera.Pitch = cpitch * MathF.PI / 180f;
+            }
+
     }
 
     private enum LoadStage
@@ -500,6 +527,7 @@ internal static class Program
         GL? gl = null;
         Renderer? renderer = null;
         StatusOverlay? overlay = null;
+        AppearancePanel? appearance = null;
         AnimationPlayback? playback = null;
         DlssSeam? dlss = null;
         var camera = new OrbitCamera();
@@ -593,6 +621,7 @@ internal static class Program
             gl = window.CreateOpenGL();
             LogMsaa(gl, msaaSamples, "viewer");
             overlay = new StatusOverlay(gl);
+            appearance = new AppearancePanel(overlay, PresentationSettings.FromEnvironment());
             // The seam is optional: a construction failure (FBO/shader) must
             // degrade to plain viewing, never kill the viewer. In demo mode
             // there is nothing to evidence without it, so fail fast.
@@ -661,7 +690,7 @@ internal static class Program
                     closeRequested = true;
                 }
             }
-            HookInput(window, camera, () => closeRequested = true, () => playback,
+            HookInput(window, camera, () => { if (appearance?.Close() != true) { closeRequested = true; } }, () => playback,
                 onDlssFrame: () => dlss?.Trigger(), onCameraInput: () => dlss?.Release(),
                 onDlssToggleAB: () => dlss?.ToggleAB(),
                 onScreenshot: () =>
@@ -672,8 +701,13 @@ internal static class Program
                     shotPending = Path.Combine(dir, $"shot-{DateTime.Now:yyyyMMdd-HHmmss-fff}.png");
                 },
                 onUiMouseDown: (x, y, w, h) => dlss?.HandleMouseDown(x, y, w, h) == true,
+                onAppearanceMouseDown: (x, y, w, h) => appearance?.HandleMouseDown(x, y, w, h) == true,
                 onUiRightClick: (x, y, w, h) => dlss?.HandleRightClick(x, y, w, h) == true,
-                onUiMouseMove: (x, y) => dlss?.HandleMouseMove(x, y));
+                onUiMouseMove: (x, y) => dlss?.HandleMouseMove(x, y),
+                onAppearanceMouseMove: (x, y) => appearance?.HandleMouseMove(x, y),
+                onUiMouseUp: () => appearance?.HandleMouseUp(),
+                onUiContains: (x, y, w, h) => appearance?.Contains(x, y, w, h) == true,
+                onAppearance: () => appearance?.Toggle());
         };
 
         window.Render += delta =>
@@ -699,6 +733,28 @@ internal static class Program
                 if (parts is ["shot"])
                 {
                     shotPending = Path.Combine(ctlDir, $"shot-{Guid.NewGuid():N}.png");
+                }
+                else if (parts is ["appearance"])
+                {
+                    appearance?.Toggle();
+                }
+                else if (parts is ["appearance", "up"])
+                {
+                    appearance?.HandleMouseUp();
+                }
+                else if (parts is ["appearance", var action, var xText, var yText]
+                    && float.TryParse(xText, NumberStyles.Float, CultureInfo.InvariantCulture, out var ux)
+                    && float.TryParse(yText, NumberStyles.Float, CultureInfo.InvariantCulture, out var uy)
+                    && float.IsFinite(ux) && float.IsFinite(uy))
+                {
+                    if (action == "down")
+                    {
+                        appearance?.HandleMouseDown(ux, uy, window.Size.X, window.Size.Y);
+                    }
+                    else if (action == "move")
+                    {
+                        appearance?.HandleMouseMove(ux, uy);
+                    }
                 }
                 else if (parts is ["frame"])
                 {
@@ -749,6 +805,10 @@ internal static class Program
             var width = window.FramebufferSize.X;
             var height = window.FramebufferSize.Y;
             var elapsed = (float)clock.Elapsed.TotalSeconds;
+            if (width <= 0 || height <= 0)
+            {
+                return;
+            }
 
             // Fire the synthetic click once the app is ready (the UI is up
             // and the seam exists).
@@ -872,6 +932,7 @@ internal static class Program
                             $"  dlss demo: detail framing (top 35% of the model)");
                     }
                     camera.FrameBounds(bMin, bMax);
+                    ApplyCameraOverride(camera);
                     window.Title = $"Centre Stage — {Path.GetFileName(path)}";
                 }
 
@@ -918,6 +979,16 @@ internal static class Program
                 var sky = new Vector3(0.45f, 0.55f, 0.70f);
                 var ground = new Vector3(0.22f, 0.20f, 0.18f);
 
+                if (appearance is not null)
+                {
+                    if (renderer.Presentation != appearance.Settings)
+                    {
+                        dlss?.InvalidateAppearance();
+                    }
+                    renderer.SetPresentation(appearance.Settings);
+                    appearance.Contains(0, 0, window.Size.X, window.Size.Y);
+                }
+
                 // The animation advances once per frame; both the normal draw
                 // and the DLSS capture pass render the same pose.
                 ScenePose? pose = null;
@@ -948,6 +1019,8 @@ internal static class Program
                     }
                 }
                 dlss?.EndFrame(overlay, width, height, elapsed, () => closeRequested = true);
+                appearance?.Draw(width, height);
+                ReportGlErrors(gl);
             }
         };
 
@@ -1040,7 +1113,12 @@ internal static class Program
         Action? onScreenshot = null,
         Func<float, float, int, int, bool>? onUiMouseDown = null,
         Func<float, float, int, int, bool>? onUiRightClick = null,
-        Action<float, float>? onUiMouseMove = null)
+        Action<float, float>? onUiMouseMove = null,
+        Action? onUiMouseUp = null,
+        Func<float, float, int, int, bool>? onUiContains = null,
+        Action? onAppearance = null,
+        Func<float, float, int, int, bool>? onAppearanceMouseDown = null,
+        Action<float, float>? onAppearanceMouseMove = null)
     {
         var input = window.CreateInput();
         var getPlayback = playback;
@@ -1095,6 +1173,10 @@ internal static class Program
                 {
                     onDlssToggleAB?.Invoke();
                 }
+                else if (key == Key.F8)
+                {
+                    onAppearance?.Invoke();
+                }
                 else if (key == Key.F9)
                 {
                     // One frame through the native pipeline (seconds per frame,
@@ -1141,6 +1223,14 @@ internal static class Program
 
         primary.MouseDown += (mouse, button) =>
         {
+            var logical = mouse.Position;
+            if ((button == MouseButton.Left && onAppearanceMouseDown?.Invoke(logical.X, logical.Y, window.Size.X, window.Size.Y) == true)
+                || (button != MouseButton.Left && onUiContains?.Invoke(logical.X, logical.Y, window.Size.X, window.Size.Y) == true))
+            {
+                uiPressButton = button;
+                lastClickTicks = 0;
+                return;
+            }
             var fb = ToFramebuffer(new System.Numerics.Vector2(mouse.Position.X, mouse.Position.Y));
             if (button == MouseButton.Left
                 && onUiMouseDown?.Invoke(fb.X, fb.Y, window.FramebufferSize.X,
@@ -1193,6 +1283,7 @@ internal static class Program
             if (button == MouseButton.Left)
             {
                 dragging = false;
+                onUiMouseUp?.Invoke();
             }
 
             if (button is MouseButton.Right or MouseButton.Middle)
@@ -1208,6 +1299,7 @@ internal static class Program
         {
             var fb = ToFramebuffer(new System.Numerics.Vector2(position.X, position.Y));
             onUiMouseMove?.Invoke(fb.X, fb.Y);
+            onAppearanceMouseMove?.Invoke(position.X, position.Y);
 
             // Silk.NET reports absolute positions; orbit/pan need per-event deltas.
             var current = new Vector2(position.X, position.Y);
@@ -1232,8 +1324,13 @@ internal static class Program
                 onCameraInput?.Invoke();
             }
         };
-        primary.Scroll += (_, wheel) =>
+        primary.Scroll += (mouse, wheel) =>
         {
+            var p = mouse.Position;
+            if (onUiContains?.Invoke(p.X, p.Y, window.Size.X, window.Size.Y) == true)
+            {
+                return;
+            }
             camera.Zoom(wheel.Y * 0.25f);
             onCameraInput?.Invoke();
         };

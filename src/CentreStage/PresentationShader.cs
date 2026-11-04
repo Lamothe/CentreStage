@@ -21,6 +21,9 @@ internal static class PresentationShader
     private static string Build()
     {
         var source = Replace(ShaderSources.Fragment, "#version 330 core", "#version 330 core\n" + StudioEnvironment.Glsl + "\n" + """
+            layout(location = 1) out vec4 DiffuseOutput;
+            uniform bool uSssCapture;
+            uniform float uSssMaterial;
             uniform float uEnvironmentIntensity;
             uniform int uHasEnvironmentCubemap;
             uniform samplerCube uEnvironmentCubemap;
@@ -153,6 +156,29 @@ internal static class PresentationShader
                 // Composite in display-linear light, never gamma-encoded sRGB.
                 color = linearToSrgb(mix(srgbToLinear(color), transmittedLinear, t));
             }
+            """);
+        // The split is linear radiance: blur only diffuse light, never the
+        // base atlas, specular lobes, emission, glass or transparent hair.
+        source = Replace(source, "out vec4 FragColor;", "layout(location = 0) out vec4 FragColor;");
+        source = Replace(source, "vec3 color = vec3(0.0);", "vec3 color = vec3(0.0); vec3 sssDiffuse = vec3(0.0);");
+        source = Replace(source, "color += (kd * base.rgb / PI + specular) * radiance * NoL;", "color += (kd * base.rgb / PI + specular) * radiance * NoL; sssDiffuse += kd * base.rgb / PI * radiance * NoL;");
+        source = Replace(source,
+            "color += ambient * base.rgb * (1.0 - metallic) * (1.0 - envFresnel);",
+            "color += ambient * base.rgb * (1.0 - metallic) * (1.0 - envFresnel); sssDiffuse += ambient * base.rgb * (1.0 - metallic) * (1.0 - envFresnel);");
+        source = Replace(source, "color *= mix(1.0, ao, uOcclusionStrength);",
+            "color *= mix(1.0, ao, uOcclusionStrength); sssDiffuse *= mix(1.0, ao, uOcclusionStrength);");
+        source = Replace(source, "color = presentationMap(color);", """
+            if (uSssCapture)
+            {
+                FragColor = vec4(color, base.a);
+                DiffuseOutput = vec4(sssDiffuse, uSssMaterial);
+                return;
+            }
+            color = presentationMap(color);
+            """);
+        source = Replace(source, "FragColor = vec4(authored, base.a);", """
+            DiffuseOutput = vec4(0.0, 0.0, 0.0, -1.0);
+            FragColor = vec4(authored, base.a);
             """);
         return source;
     }

@@ -481,6 +481,83 @@ Raw isolations and embedded texture extracts are in ignored
 `.evidence/una-hair-nose/`. Hair shape/colour and the remaining nose fringe are
 **not resolved** in this change.
 
+### Live appearance panel and diffuse scattering (04/11/2026)
+
+Click **Appearance** at the top-left or press **F8** to open/close the right-hand
+panel. Controls: environment intensity/rotation, exposure, skin scattering and
+radius, specular antialiasing and saturation. Changes apply immediately; Reset
+restores this launch's settings, including environment overrides. Esc closes the
+panel first; a second Esc closes the viewer. Drags stay captured until release;
+wheel/pan over the panel does not move the model. Settings are session-only, not
+saved per model. The panel is absent from `--capture` and pinned neural views.
+
+![Appearance controls](docs/appearance-panel.png)
+
+Scattering is optional and off by default; its switch enables strength 0.65. It
+is not the old `SKIN_DIFFUSION` normal-softening approximation. The new path
+separates linear diffuse lighting from opaque radiance into HDR attachments,
+applies two depth/mask-aware 17-tap RGB diffusion passes, then recombines
+`radiance + strength × (blurredDiffuse - diffuse)` before display mapping.
+Reflections, emission, transparent hair and glass are not blurred. Background and
+unlit materials bypass grading unchanged. Glass/hair draw after the resolve and
+depth transfer. The RGB kernel carries red farther than blue. This is a general
+skin approximation, **not** Una's authored Sketchfab SSS profile; currently it
+blurs lit diffuse colour rather than factoring/reapplying albedo separately.
+
+Sketchfab's viewer source inspected at the supplied model URL contains
+`sssCommon.glsl` checkerboard separation/reconstruction, `sssBlur.glsl` jittered
+sampling and `sssCombine.glsl` diffuse-plus-specular reconstruction. Una enables
+SSS on skin. That supports the mechanism to investigate, but does **not prove**
+every visible stippled feature originates there. This implementation uses
+separate attachments and stable sampling rather than copying a noise pattern.
+It does not reproduce temporal AA, translucency, the exact profile/kernel or the
+complete reference lighting and tonal response.
+
+| diagnostic | default / range | effect |
+|---|---|---|
+| `CENTRESTAGE_SSS` | 0 / [0,1] finite | diffuse scattering blend strength on skin-family opaque/masked materials |
+| `CENTRESTAGE_SSS_RADIUS` | 0.002 / [0.0001,0.01] finite | radius as proportion of model bounding-box diagonal; perspective-correct, capped at 8% viewport height |
+| `CENTRESTAGE_GL_CHECK` | off / `1` | report GL errors after live/capture draws; failure exit code on error |
+
+`CENTRESTAGE_SKIN_MATERIAL` selects eligible name-token families (default `skin`).
+Names do not recover physical thickness/profile metadata. The old
+`CENTRESTAGE_SKIN_DIFFUSION` remains separate and defaults 0.
+
+Frozen 1280×800 lip captures, camera `0,16020,1100,190,90,0`, patch
+`850x160+215+320`, radius 0.002:
+
+| setting | grey mean | grey sd |
+|---|---:|---:|
+| scattering off | 0.660353 | 0.023760 |
+| strength 0.65 | 0.660344 | 0.023605 |
+
+![Off / diffuse scattering 0.65](docs/una-subsurface.png)
+
+This is a subtle diffuse change, **not a demonstrated Sketchfab match**; the pale
+specular mouth seam remains. The toggle permits direct judgement and radius
+adjustment without recompiling or shell variables.
+
+Verification: **259 tests pass**, zero build warnings/errors; **46 pinned rasters
+remain byte-identical**, all four pinned entry points reject both SSS variables
+(8 checks), and default-off lips remain byte-identical. An unlit fixture plus
+clear background has **0 changed pixels** on/off. Single-sample and 4× MSAA SSS
+captures report no GL errors. Live FIFO panel checks cover toggle, slider
+release/no drift and exact Reset raster parity. F9's 640×400 capture, 1280×800
+reference and window render exercise repeated target resizing with SSS; an
+appearance edit during inference discards the stale result; editing a pinned
+result returns to live. Installed Release scattering capture is byte-identical
+to Debug. Independent review
+prompted fixes for input release/HiDPI routing, unlit/background classification,
+depth-format-independent transfer, empty drawables and stale F9 presentation.
+Physical HiDPI pointer, F8 delivery and OS minimise/restore were not independently
+exercised; pure layout tests cover scaling and tiny windows. Zero-sized
+interactive framebuffers skip drawing. Evidence: `.evidence/una-sss/`.
+
+Automation adds `appearance`, `appearance down x y`, `appearance move x y` and
+`appearance up` to the instance FIFO (logical-window coordinates), routed to the
+same panel methods as pointer input. `CENTRESTAGE_CAMERA` now also sets the
+initial interactive view, using the capture parser.
+
 ### Lip filtering and real HDR reflection diagnostics (04/11/2026)
 
 The extreme lip comparison is **not matched**. Tracing the supplied scene gives

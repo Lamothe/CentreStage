@@ -267,6 +267,8 @@ public class PresentationSettingsTests
     }
 
     [Theory]
+    [InlineData("CENTRESTAGE_SSS", 0f, 0f, 1f)]
+    [InlineData("CENTRESTAGE_SSS_RADIUS", 0.002f, 0.0001f, 0.01f)]
     [InlineData("CENTRESTAGE_SPECULAR_AA", 0f, 0f, 1f)]
     [InlineData("CENTRESTAGE_CUBEMAP_INTENSITY", 8f, 0f, 128f)]
     public void FilteringDiagnosticsValidateFiniteRanges(string name, float fallback, float min, float max)
@@ -311,6 +313,8 @@ public class PresentationSettingsTests
 
     private static float Number(PresentationSettings settings, string name) => name switch
     {
+        "CENTRESTAGE_SSS" => settings.SubsurfaceScattering,
+        "CENTRESTAGE_SSS_RADIUS" => settings.SubsurfaceRadius,
         "CENTRESTAGE_SPECULAR_AA" => settings.SpecularAntialiasing,
         "CENTRESTAGE_CUBEMAP_INTENSITY" => settings.CubemapIntensity,
         "CENTRESTAGE_ENV_INTENSITY" => settings.EnvironmentIntensity,

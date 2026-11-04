@@ -23,6 +23,7 @@
     <Compile Include="..\..\src\CentreStage\ControlChannel.cs" Link="ControlChannel.cs" />
     <Compile Include="..\..\src\CentreStage\ShaderSources.cs" Link="ShaderSources.cs" />
     <Compile Include="..\..\src\CentreStage\StudioEnvironment.cs" Link="StudioEnvironment.cs" />
+    <Compile Include="..\..\src\CentreStage\SubsurfaceShaders.cs" Link="SubsurfaceShaders.cs" />
     <Compile Include="..\..\src\CentreStage\PresentationShader.cs" Link="PresentationShader.cs" />
   </ItemGroup>
 

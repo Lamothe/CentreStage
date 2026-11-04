@@ -17,6 +17,8 @@ public sealed record PresentationSettings
     public string EnvironmentCubemap { get; init; } = "";
     public float CubemapIntensity { get; init; } = 8f;
     public bool TrilinearFiltering { get; init; } = false;
+    public float SubsurfaceScattering { get; init; } = 0f;
+    public float SubsurfaceRadius { get; init; } = 0.002f;
     public float SkinDiffusion { get; init; } = 0f;
     public string SkinFamilies { get; init; } = "skin";
 
@@ -32,7 +34,7 @@ public sealed record PresentationSettings
 
     public static readonly IReadOnlyList<string> Variables = Array.AsReadOnly(new[]
     {
-        "CENTRESTAGE_ENV_CUBEMAP", "CENTRESTAGE_CUBEMAP_INTENSITY", "CENTRESTAGE_SPECULAR_AA", "CENTRESTAGE_TRILINEAR", "CENTRESTAGE_FALLBACK_LIGHT", "CENTRESTAGE_PRESENTATION", "CENTRESTAGE_ENV_INTENSITY", "CENTRESTAGE_ENV_ROTATION",
+        "CENTRESTAGE_SSS", "CENTRESTAGE_SSS_RADIUS", "CENTRESTAGE_ENV_CUBEMAP", "CENTRESTAGE_CUBEMAP_INTENSITY", "CENTRESTAGE_SPECULAR_AA", "CENTRESTAGE_TRILINEAR", "CENTRESTAGE_FALLBACK_LIGHT", "CENTRESTAGE_PRESENTATION", "CENTRESTAGE_ENV_INTENSITY", "CENTRESTAGE_ENV_ROTATION",
         "CENTRESTAGE_EXPOSURE", "CENTRESTAGE_BRIGHTNESS", "CENTRESTAGE_CONTRAST",
         "CENTRESTAGE_SATURATION", "CENTRESTAGE_SKIN_DIFFUSION", "CENTRESTAGE_SKIN_MATERIAL",
     });
@@ -71,6 +73,8 @@ public sealed record PresentationSettings
         return defaults with
         {
             Enabled = enabled != "0",
+            SubsurfaceScattering = Number("CENTRESTAGE_SSS", defaults.SubsurfaceScattering, 0f, 1f),
+            SubsurfaceRadius = Number("CENTRESTAGE_SSS_RADIUS", defaults.SubsurfaceRadius, 0.0001f, 0.01f),
             EnvironmentCubemap = read("CENTRESTAGE_ENV_CUBEMAP") ?? "",
             CubemapIntensity = Number("CENTRESTAGE_CUBEMAP_INTENSITY", defaults.CubemapIntensity, 0f, 128f),
             SpecularAntialiasing = Number("CENTRESTAGE_SPECULAR_AA", defaults.SpecularAntialiasing, 0f, 1f),

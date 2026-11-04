@@ -7,12 +7,13 @@ public class PresentationSettingsTests
 {
     public static TheoryData<string, float, float, float> NumericSettings => new()
     {
-        { "CENTRESTAGE_ENV_INTENSITY", 0.8f, 0f, 16f },
+        { "CENTRESTAGE_ENV_INTENSITY", 1.12f, 0f, 16f },
+        { "CENTRESTAGE_FALLBACK_LIGHT", 0f, 0f, 16f },
         { "CENTRESTAGE_ENV_ROTATION", 0f, -360f, 360f },
         { "CENTRESTAGE_EXPOSURE", 0f, -8f, 8f },
         { "CENTRESTAGE_BRIGHTNESS", 0.04f, -0.5f, 0.5f },
         { "CENTRESTAGE_CONTRAST", -0.12f, -1f, 1f },
-        { "CENTRESTAGE_SATURATION", 0.65f, 0f, 2f },
+        { "CENTRESTAGE_SATURATION", 0.73f, 0f, 2f },
         { "CENTRESTAGE_SKIN_DIFFUSION", 0.8f, 0f, 1f },
     };
 
@@ -42,12 +43,12 @@ public class PresentationSettingsTests
         var settings = new PresentationSettings();
 
         Assert.True(settings.Enabled);
-        Assert.Equal(0.8f, settings.EnvironmentIntensity);
+        Assert.Equal(1.12f, settings.EnvironmentIntensity);
         Assert.Equal(0f, settings.EnvironmentRotation);
         Assert.Equal(0f, settings.Exposure);
         Assert.Equal(0.04f, settings.Brightness);
         Assert.Equal(-0.12f, settings.Contrast);
-        Assert.Equal(0.65f, settings.Saturation);
+        Assert.Equal(0.73f, settings.Saturation);
         Assert.Equal(0.8f, settings.SkinDiffusion);
         Assert.Equal("skin", settings.SkinFamilies);
     }
@@ -211,9 +212,40 @@ public class PresentationSettingsTests
         Assert.Empty(warnings);
     }
 
+    [Fact]
+    public void StudioDefaultHasNoSyntheticPunctualLight()
+    {
+        var settings = PresentationSettings.Parse(_ => null);
+        Assert.Equal(0f, settings.EffectiveFallbackLightIntensity);
+        Assert.Equal(0f, settings.FallbackLightIntensity);
+        Assert.Contains("CENTRESTAGE_FALLBACK_LIGHT", PresentationSettings.Variables);
+    }
+
+    [Fact]
+    public void StudioCanExplicitlyRestoreSyntheticKey()
+    {
+        var settings = PresentationSettings.Parse(key =>
+            key == "CENTRESTAGE_FALLBACK_LIGHT" ? "2.5" : null);
+        Assert.Equal(2.5f, settings.EffectiveFallbackLightIntensity);
+    }
+
+    [Fact]
+    public void LegacyAndDisabledPresentationRetainOriginalKeyRegardlessOfOverride()
+    {
+        var settings = PresentationSettings.Parse(key => key switch
+        {
+            "CENTRESTAGE_PRESENTATION" => "0",
+            "CENTRESTAGE_FALLBACK_LIGHT" => "0",
+            _ => null,
+        });
+        Assert.Equal(2.5f, settings.EffectiveFallbackLightIntensity);
+        Assert.Equal(2.5f, PresentationSettings.Legacy.EffectiveFallbackLightIntensity);
+    }
+
     private static float Number(PresentationSettings settings, string name) => name switch
     {
         "CENTRESTAGE_ENV_INTENSITY" => settings.EnvironmentIntensity,
+        "CENTRESTAGE_FALLBACK_LIGHT" => settings.FallbackLightIntensity,
         "CENTRESTAGE_ENV_ROTATION" => settings.EnvironmentRotation,
         "CENTRESTAGE_EXPOSURE" => settings.Exposure,
         "CENTRESTAGE_BRIGHTNESS" => settings.Brightness,

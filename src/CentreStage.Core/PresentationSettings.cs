@@ -6,20 +6,25 @@ namespace CentreStage.Core;
 public sealed record PresentationSettings
 {
     public bool Enabled { get; init; } = true;
-    public float EnvironmentIntensity { get; init; } = 0.8f;
+    public float EnvironmentIntensity { get; init; } = 1.12f;
     public float EnvironmentRotation { get; init; } = 0f;
+    public float FallbackLightIntensity { get; init; } = 0f;
     public float Exposure { get; init; } = 0f;
     public float Brightness { get; init; } = 0.04f;
     public float Contrast { get; init; } = -0.12f;
-    public float Saturation { get; init; } = 0.65f;
+    public float Saturation { get; init; } = 0.73f;
     public float SkinDiffusion { get; init; } = 0.8f;
     public string SkinFamilies { get; init; } = "skin";
+
+    /// <summary>Do not add a synthetic hard key on top of IBL unless requested.
+    /// Legacy/pinned views must retain exactly their original light intensity.</summary>
+    public float EffectiveFallbackLightIntensity => Enabled ? FallbackLightIntensity : 2.5f;
 
     public static PresentationSettings Legacy { get; } = new() { Enabled = false, SkinDiffusion = 0f };
 
     public static readonly IReadOnlyList<string> Variables = Array.AsReadOnly(new[]
     {
-        "CENTRESTAGE_PRESENTATION", "CENTRESTAGE_ENV_INTENSITY", "CENTRESTAGE_ENV_ROTATION",
+        "CENTRESTAGE_FALLBACK_LIGHT", "CENTRESTAGE_PRESENTATION", "CENTRESTAGE_ENV_INTENSITY", "CENTRESTAGE_ENV_ROTATION",
         "CENTRESTAGE_EXPOSURE", "CENTRESTAGE_BRIGHTNESS", "CENTRESTAGE_CONTRAST",
         "CENTRESTAGE_SATURATION", "CENTRESTAGE_SKIN_DIFFUSION", "CENTRESTAGE_SKIN_MATERIAL",
     });
@@ -55,6 +60,7 @@ public sealed record PresentationSettings
             Enabled = enabled != "0",
             EnvironmentIntensity = Number("CENTRESTAGE_ENV_INTENSITY", defaults.EnvironmentIntensity, 0f, 16f),
             EnvironmentRotation = Number("CENTRESTAGE_ENV_ROTATION", defaults.EnvironmentRotation, -360f, 360f),
+            FallbackLightIntensity = Number("CENTRESTAGE_FALLBACK_LIGHT", defaults.FallbackLightIntensity, 0f, 16f),
             Exposure = Number("CENTRESTAGE_EXPOSURE", defaults.Exposure, -8f, 8f),
             Brightness = Number("CENTRESTAGE_BRIGHTNESS", defaults.Brightness, -0.5f, 0.5f),
             Contrast = Number("CENTRESTAGE_CONTRAST", defaults.Contrast, -1f, 1f),

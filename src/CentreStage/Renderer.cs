@@ -149,7 +149,7 @@ internal sealed unsafe class Renderer : IDisposable
         if (!pinnedEvidence)
         {
             Console.WriteLine(_presentation.Enabled
-                ? FormattableString.Invariant($"  presentation: studio intensity={_presentation.EnvironmentIntensity:0.###}, rotation={_presentation.EnvironmentRotation:0.###}deg, exposure={_presentation.Exposure:0.###} stops, brightness={_presentation.Brightness:0.###}, contrast={_presentation.Contrast:0.###}, saturation={_presentation.Saturation:0.###}, diffusion={_presentation.SkinDiffusion:0.###} ({_presentation.SkinFamilies})")
+                ? FormattableString.Invariant($"  presentation: studio intensity={_presentation.EnvironmentIntensity:0.###}, rotation={_presentation.EnvironmentRotation:0.###}deg, fallbackKey={_presentation.FallbackLightIntensity:0.###}, exposure={_presentation.Exposure:0.###} stops, brightness={_presentation.Brightness:0.###}, contrast={_presentation.Contrast:0.###}, saturation={_presentation.Saturation:0.###}, diffusion={_presentation.SkinDiffusion:0.###} ({_presentation.SkinFamilies})")
                 : "  presentation: legacy hemispheric lighting/tones");
         }
 
@@ -1355,8 +1355,8 @@ internal sealed unsafe class Renderer : IDisposable
         SetInt("uLightCount", count);
 
         var hasSceneLights = count > 0;
-        // Always give the camera a key light so unlit-by-author models stay legible;
-        // it is zeroed when the scene already carries its own lights.
+        // Legacy/pinned views retain the original hard key. Studio lighting supplies
+        // illumination itself; an optional diagnostic key is used only without authored lights.
         var pos = new Vector3[MaxLights];
         var dir = new Vector3[MaxLights];
         var color = new Vector3[MaxLights];
@@ -1386,7 +1386,7 @@ internal sealed unsafe class Renderer : IDisposable
             pos[0] = new Vector3(2, 4, 2);
             dir[0] = Vector3.Normalize(new Vector3(-2, -4, -2));
             color[0] = Vector3.One;
-            intensity[0] = 2.5f;
+            intensity[0] = _presentation.EffectiveFallbackLightIntensity;
             directional[0] = 1f;
             SetInt("uLightCount", 1);
         }

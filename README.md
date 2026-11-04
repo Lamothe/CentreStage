@@ -156,9 +156,10 @@ The pinned entry points also *reject* `CENTRESTAGE_BLEND_*`
 and the other diagnostics outright, so the variable cannot be used to move a
 locked frame. Live viewing and `--capture` use k = 3.
 
-### Studio lighting and presentation (04/11/2026)
+### Studio lighting and presentation (04/11/2026, first implementation)
 
-Live viewing and `--capture` now use an asset-independent analytic studio environment:
+The first studio implementation (commit `aa73b35`; revised defaults in the
+follow-up below) uses an asset-independent analytic studio environment:
 a neutral room, broad upper softboxes and a subtle cool fill. Diffuse irradiance
 and roughness-broadened specular radiance come from the same spherical-Gaussian
 lobes; the specular term uses a two-coefficient environment BRDF fit. This is a
@@ -292,6 +293,64 @@ versus (29,35,45) without emission; it does not vanish against a saturated
 hypothetical opaque surface. The legacy/failed-capture fallback stays before
 mapping. The retained transmission limits below still apply. Raw local evidence
 and pinned hash comparisons are in ignored `.evidence/sketchfab-look/`.
+
+### Follow-up: environment-only lighting (04/11/2026)
+
+The first studio implementation above still received the renderer's automatic
+**2.5-intensity directional key** on every model without authored lights. This
+was not shown by the GLB's `lights: 0` diagnostic, and it contradicted the supplied
+Sketchfab scene's environment-only lighting. That hard key was a major source of
+the harsh normal-map/pore contrast; normal softening alone barely affected it.
+
+Studio mode now defaults to **no synthetic punctual light**. Authored glTF lights
+are still honoured, and legacy/pinned renderers retain their original key exactly.
+No shaders, textures, per-material settings or skin heuristic were changed in
+this follow-up. Studio intensity is rebalanced to **1.12** (previously 0.8),
+and saturation to **0.73** (previously 0.65). The earlier tables describe the
+first implementation, not these new defaults.
+
+New diagnostic: `CENTRESTAGE_FALLBACK_LIGHT=<n>`, default **0**, finite range
+**[0,16]**. It sets the synthetic directional key intensity **only in studio mode
+and only when the scene has no authored lights**. It does not scale authored
+lights. Invalid values warn and use zero. Startup reports `fallbackKey`; all
+four pinned entry points reject the variable even if set to zero. Presentation
+off ignores it and retains 2.5. To reproduce the previous studio build exactly:
+
+```sh
+CENTRESTAGE_FALLBACK_LIGHT=2.5 CENTRESTAGE_ENV_INTENSITY=0.8 \
+  CENTRESTAGE_SATURATION=0.65 CENTRESTAGE_CAMERA="350,16700,775,800,75,0" \
+  dotnet run --no-build --project src/CentreStage -- \
+  /home/michael/Downloads/Una-109b3c7b/Una.glb --capture previous-studio.png
+```
+
+Same frozen camera, crop and ImageMagick commands as above; no framing changes:
+
+| configuration | grey mean | grey sd | HSL saturation | mean RGB |
+|---|---:|---:|---:|---|
+| Sketchfab reference | 0.719813 | 0.062415 | 0.198192 | (0.538788, 0.418891, 0.385368) |
+| first studio build (`aa73b35`) | 0.732927 | 0.129566 | 0.200679 | (0.547893, 0.453168, 0.411411) |
+| key removed only, previous intensity/saturation | 0.682671 | 0.104177 | 0.168531 | (0.446809, 0.351467, 0.317533) |
+| environment-only, rebalanced defaults | **0.719022** | **0.112090** | **0.190242** | **(0.531513, 0.421423, 0.378563)** |
+
+Against the first studio build, absolute mean-grey error falls 94%, mean-RGB
+Euclidean error falls 77%, and sd falls 13.5%; saturation error grows from
+0.0025 to 0.0080. These are colour statistics, not a claim of registered image
+similarity. Compared with Sketchfab, sd remains **1.80×** too high. The sclera,
+lashes and iris contrast still differ, as do projection and the environment;
+this does not supply the missing spatial SSS or reproduce Sketchfab exactly.
+
+![Sketchfab reference, first studio build, environment-only defaults (left to right)](docs/sketchfab-look-followup.png)
+
+Follow-up verification: **214 tests passing**, zero build warnings/errors;
+**46 pinned PPMs byte-identical** to the preceding build; presentation-off PNG
+and restored-first-studio PNG each byte-identical to their corresponding saved
+baselines. All four pinned entry points reject the new variable. A synthetic
+quad with an authored directional light captures identically with fallback 0
+and 16, confirming that this lever leaves authored lighting alone. A new
+Teen Kitty capture completes as a second-model smoke check. Independent
+read-only review passed. `linux/install.sh` completed, and the published Release
+capture is byte-identical to Debug. Raw captures/logs are in ignored
+`.evidence/sketchfab-followup/`. No neural inference/PSNR was rerun.
 
 ### Transmission
 

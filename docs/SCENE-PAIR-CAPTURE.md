@@ -32,7 +32,7 @@ Capture rejects non-empty diagnostic environment variables: `CENTRESTAGE_SOLID`,
 presentation controls: `CENTRESTAGE_PRESENTATION`, `CENTRESTAGE_ENV_INTENSITY`,
 `CENTRESTAGE_ENV_ROTATION`, `CENTRESTAGE_EXPOSURE`, `CENTRESTAGE_BRIGHTNESS`,
 `CENTRESTAGE_CONTRAST`, `CENTRESTAGE_SATURATION`, `CENTRESTAGE_SKIN_DIFFUSION`,
-`CENTRESTAGE_SKIN_MATERIAL`. `CENTRESTAGE_HAIR_COVERAGE` is accepted, because it only
+`CENTRESTAGE_SKIN_MATERIAL`, `CENTRESTAGE_FALLBACK_LIGHT`. `CENTRESTAGE_HAIR_COVERAGE` is accepted, because it only
 adds coverage dumps to the face sweep and never changes a draw. It creates an invisible window, does not create an
 input context or inject input, and does not invoke the DLSS seam. It refuses
 an unexpected framebuffer size rather than silently scaling.

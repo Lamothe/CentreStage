@@ -3,6 +3,17 @@ namespace CentreStage.Core.Tests;
 public class PresentationShaderTests
 {
     [Fact]
+    public void LiveFilteringIsOptInWithoutNoiseOrAtlasBlur()
+    {
+        Assert.Contains("if (uSpecularAntialiasing > 0.0)", PresentationShader.Fragment);
+        Assert.Contains("dFdx(n)", PresentationShader.Fragment);
+        Assert.Contains("if (uUnlit && uAlphaMode == 1 && base.a < uAlphaCutoff)", PresentationShader.Fragment);
+        Assert.Contains("textureLod(uEnvironmentCubemap", PresentationShader.Fragment);
+        Assert.Contains("return studioSpecular(direction, roughness)", PresentationShader.Fragment);
+        Assert.DoesNotContain("uSpecularAntialiasing", ShaderSources.Fragment);
+    }
+
+    [Fact]
     public void StudioOccludesEnvironmentReflectionsBelowTheMeshHorizon()
     {
         Assert.Contains("dot(reflected, surfaceNormal)", PresentationShader.Fragment);

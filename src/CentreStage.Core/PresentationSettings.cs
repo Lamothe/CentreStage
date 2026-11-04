@@ -13,6 +13,10 @@ public sealed record PresentationSettings
     public float Brightness { get; init; } = 0.04f;
     public float Contrast { get; init; } = -0.12f;
     public float Saturation { get; init; } = 0.73f;
+    public float SpecularAntialiasing { get; init; } = 0f;
+    public string EnvironmentCubemap { get; init; } = "";
+    public float CubemapIntensity { get; init; } = 8f;
+    public bool TrilinearFiltering { get; init; } = false;
     public float SkinDiffusion { get; init; } = 0f;
     public string SkinFamilies { get; init; } = "skin";
 
@@ -28,7 +32,7 @@ public sealed record PresentationSettings
 
     public static readonly IReadOnlyList<string> Variables = Array.AsReadOnly(new[]
     {
-        "CENTRESTAGE_FALLBACK_LIGHT", "CENTRESTAGE_PRESENTATION", "CENTRESTAGE_ENV_INTENSITY", "CENTRESTAGE_ENV_ROTATION",
+        "CENTRESTAGE_ENV_CUBEMAP", "CENTRESTAGE_CUBEMAP_INTENSITY", "CENTRESTAGE_SPECULAR_AA", "CENTRESTAGE_TRILINEAR", "CENTRESTAGE_FALLBACK_LIGHT", "CENTRESTAGE_PRESENTATION", "CENTRESTAGE_ENV_INTENSITY", "CENTRESTAGE_ENV_ROTATION",
         "CENTRESTAGE_EXPOSURE", "CENTRESTAGE_BRIGHTNESS", "CENTRESTAGE_CONTRAST",
         "CENTRESTAGE_SATURATION", "CENTRESTAGE_SKIN_DIFFUSION", "CENTRESTAGE_SKIN_MATERIAL",
     });
@@ -59,9 +63,18 @@ public sealed record PresentationSettings
         {
             warn?.Invoke("warning: CENTRESTAGE_PRESENTATION expects 0 or 1; using 1");
         }
+        var trilinear = read("CENTRESTAGE_TRILINEAR");
+        if (trilinear is not (null or "" or "0" or "1"))
+        {
+            warn?.Invoke("warning: CENTRESTAGE_TRILINEAR expects 0 or 1; using 0");
+        }
         return defaults with
         {
             Enabled = enabled != "0",
+            EnvironmentCubemap = read("CENTRESTAGE_ENV_CUBEMAP") ?? "",
+            CubemapIntensity = Number("CENTRESTAGE_CUBEMAP_INTENSITY", defaults.CubemapIntensity, 0f, 128f),
+            SpecularAntialiasing = Number("CENTRESTAGE_SPECULAR_AA", defaults.SpecularAntialiasing, 0f, 1f),
+            TrilinearFiltering = trilinear == "1",
             EnvironmentIntensity = Number("CENTRESTAGE_ENV_INTENSITY", defaults.EnvironmentIntensity, 0f, 16f),
             EnvironmentRotation = Number("CENTRESTAGE_ENV_ROTATION", defaults.EnvironmentRotation, -360f, 360f),
             FallbackLightIntensity = Number("CENTRESTAGE_FALLBACK_LIGHT", defaults.FallbackLightIntensity, 0f, 16f),

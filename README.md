@@ -481,6 +481,72 @@ Raw isolations and embedded texture extracts are in ignored
 `.evidence/una-hair-nose/`. Hair shape/colour and the remaining nose fringe are
 **not resolved** in this change.
 
+### Lip filtering and real HDR reflection diagnostics (04/11/2026)
+
+The extreme lip comparison is **not matched**. Tracing the supplied scene gives
+no evidence that opaque skin uses hair's alpha dithering: `SkinHead.Opacity` and
+`AlphaMask` are disabled; hair opacity explicitly uses `dithering`. This does not
+dismiss the visible fine treatment in Sketchfab. Its precise source remains
+unidentified; do not manufacture a stippled overlay and call it the same effect.
+Spatial SSS and temporal filtering remain absent from Centre Stage.
+
+The GLB's shared sampler uses LINEAR minification (9729), whereas Sketchfab's
+skin colour/normal settings request LINEAR_MIPMAP_LINEAR. Tangent checks found
+maximum absolute N·T 0.00772, mean 0.00196, unit normals and no exact repeated
+head triangles; none establishes an overlapping skin layer. The large pale seam
+remains a specular response. Tested absolute/geometric NoV and diffuse-Fresnel
+changes did not deliver a match and were discarded.
+
+Four **opt-in** diagnostics are added; existing defaults are unchanged:
+
+| environment variable | default / range | effect |
+|---|---|---|
+| `CENTRESTAGE_SPECULAR_AA` | 0 / [0,1] finite | derivative-normal variance broadens unresolved base specular roughness; does not blur albedo or normals |
+| `CENTRESTAGE_TRILINEAR` | 0 / 0 or 1 | promotes explicitly LINEAR minification to trilinear; other authored filters unchanged |
+| `CENTRESTAGE_ENV_CUBEMAP` | empty / local path | full-mip **face-local channel-planar LogLuv gzip** specular probe; no automatic downloads or bundled Sketchfab assets |
+| `CENTRESTAGE_CUBEMAP_INTENSITY` | 8 / [0,128] finite | additional probe radiance multiplier (not measured Sketchfab exposure equivalence) |
+
+The decoder infers power-of-two size 1–1024 from the gzip trailer, validates
+bounded exact decoded length, and supports the reference's planar encoding.
+Interleaved bytes are available only through the explicit Core API, not guessed.
+Decoded pixels are finite non-negative linear RGB, uploaded as RGB32F; six faces
+are assumed +X,-X,+Y,-Y,+Z,-Z. Mip roughness uses linear LOD; orientation and
+roughness mapping have **not** been validated against Sketchfab. Specular only
+uses this map, while diffuse remains procedural. This is not full reference IBL.
+
+```sh
+CENTRESTAGE_ENV_CUBEMAP=/home/michael/Downloads/una-sketchfab-reference/env/specular_cubemap_ue4_64_luv.bin.gz \
+CENTRESTAGE_CAMERA="0,16020,1100,190,90,0" \
+  dotnet run --no-build --project src/CentreStage -- \
+  /home/michael/Downloads/Una-109b3c7b/Una.glb --capture lips-hdr.png
+```
+
+Same 1280×800 captures, fixed lip patch `850x160+215+320`:
+
+| configuration | grey mean | grey sd |
+|---|---:|---:|
+| unchanged default | 0.660353 | 0.023760 |
+| specular AA 1 only | 0.660161 | 0.023496 |
+| reference 64px probe, intensity 8, rotation 0 | 0.656816 | 0.032195 |
+
+AA/mip trials were subtle and did not reproduce the requested treatment. The
+real probe changes reflections/colour significantly but remains visibly unlike
+the target, so none is enabled by default. These local numbers describe change,
+**not a measured improvement or matched stipple**. The user-supplied lip image
+was visually available but not a registered local raster for pixel comparison.
+
+![Unchanged / specular AA / reference specular probe](docs/una-lip-filtering.png)
+
+Verification: **244 tests passing**, zero build warnings/errors; all **46 pinned
+rasters byte-identical**. The unchanged lip-default PNG is byte-identical to the
+pre-change default. All four pinned entry points reject all four new diagnostics
+(16 checked rejections). A disposable alpha-mask fixture captures with AA enabled;
+derivatives precede its discard. Independent review found and prompted fixes for
+RGB16F overflow, alpha-discard derivative ordering, preservation of unlit
+alpha masking and clearcoat's probe lookup. Installed Release default capture
+is byte-identical to the pre-change default.
+The original Una GLB is untouched. Raw captures/logs: `.evidence/una-surface/`.
+
 ### Transmission
 
 `KHR_materials_transmission` used to mix towards the sky colour, which made any

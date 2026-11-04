@@ -34,6 +34,8 @@ internal sealed unsafe class Renderer : IDisposable
     private readonly uint _program;
 
     private readonly int[] _textureIds;
+    private uint _environmentCubemap;
+    private int _environmentMaxLod;
     private readonly HashSet<int> _srgbTextures;
     private readonly List<GlPrimitive> _primitives = new();
     private readonly List<GlPrimitive> _ordered = new();
@@ -142,7 +144,7 @@ internal sealed unsafe class Renderer : IDisposable
         if (!pinnedEvidence)
         {
             Console.WriteLine(_presentation.Enabled
-                ? FormattableString.Invariant($"  presentation: studio intensity={_presentation.EnvironmentIntensity:0.###}, rotation={_presentation.EnvironmentRotation:0.###}deg, fallbackKey={_presentation.FallbackLightIntensity:0.###}, exposure={_presentation.Exposure:0.###} stops, brightness={_presentation.Brightness:0.###}, contrast={_presentation.Contrast:0.###}, saturation={_presentation.Saturation:0.###}, diffusion={_presentation.SkinDiffusion:0.###} ({_presentation.SkinFamilies})")
+                ? FormattableString.Invariant($"  presentation: studio intensity={_presentation.EnvironmentIntensity:0.###}, rotation={_presentation.EnvironmentRotation:0.###}deg, fallbackKey={_presentation.FallbackLightIntensity:0.###}, exposure={_presentation.Exposure:0.###} stops, brightness={_presentation.Brightness:0.###}, contrast={_presentation.Contrast:0.###}, saturation={_presentation.Saturation:0.###}, specularAA={_presentation.SpecularAntialiasing:0.###}, trilinear={_presentation.TrilinearFiltering}, diffusion={_presentation.SkinDiffusion:0.###} ({_presentation.SkinFamilies})")
                 : "  presentation: legacy hemispheric lighting/tones");
         }
 
@@ -237,6 +239,10 @@ internal sealed unsafe class Renderer : IDisposable
         }
 
         _program = BuildProgram(cheapScene);
+        if (_presentation.Enabled && !cheapScene && _presentation.EnvironmentCubemap.Length > 0)
+        {
+            UploadEnvironmentCubemap();
+        }
         _textureIds = new int[model.Textures.Count];
         Array.Fill(_textureIds, -1);
         _srgbTextures = TextureColorSpace.SrgbTextureIndices(model.Materials);
@@ -421,6 +427,37 @@ internal sealed unsafe class Renderer : IDisposable
         return results;
     }
 
+    private void UploadEnvironmentCubemap()
+    {
+        var path = _presentation.EnvironmentCubemap;
+        var map = LogLuvCubemap.Load(path);
+        _environmentCubemap = _gl.GenTexture();
+        _gl.ActiveTexture(TextureUnit.Texture13);
+        _gl.BindTexture(TextureTarget.TextureCubeMap, _environmentCubemap);
+        for (var mip = 0; mip < map.Levels.Count; mip++)
+        {
+            var level = map.Levels[mip];
+            var faceLength = level.Size * level.Size * 3;
+            for (var face = 0; face < 6; face++)
+            {
+                fixed (float* pixels = &level.Rgb[face * faceLength])
+                {
+                    _gl.TexImage2D((TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face),
+                        mip, InternalFormat.Rgb32f, (uint)level.Size, (uint)level.Size, 0,
+                        PixelFormat.Rgb, PixelType.Float, pixels);
+                }
+            }
+        }
+        _environmentMaxLod = map.Levels.Count - 1;
+        _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMinFilter, (int)GLEnum.LinearMipmapLinear);
+        _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMagFilter, (int)GLEnum.Linear);
+        foreach (var axis in new[] { TextureParameterName.TextureWrapS, TextureParameterName.TextureWrapT, TextureParameterName.TextureWrapR })
+        {
+            _gl.TexParameter(TextureTarget.TextureCubeMap, axis, (int)GLEnum.ClampToEdge);
+        }
+        Console.WriteLine($"  environment cubemap: {path}, size={map.Levels[0].Size}, mips={map.Levels.Count}, intensity={_presentation.CubemapIntensity}");
+    }
+
     /// <summary>Uploads one decoded texture to the GPU. GL thread only.</summary>
     public void UploadTexture(int index, ImageResult image)
     {
@@ -440,11 +477,13 @@ internal sealed unsafe class Renderer : IDisposable
 
         _gl.GenerateMipmap(TextureTarget.Texture2D);
 
+        var minFilter = _presentation.Enabled && _presentation.TrilinearFiltering
+            && tex.MinFilter == 9729 ? 9987 : tex.MinFilter;
         var wrapS = SamplerWraps.Contains(tex.WrapS) ? (GLEnum)tex.WrapS : GLEnum.Repeat;
         var wrapT = SamplerWraps.Contains(tex.WrapT) ? (GLEnum)tex.WrapT : GLEnum.Repeat;
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)wrapS);
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)wrapT);
-        _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)SamplerFilter(tex.MinFilter, GLEnum.LinearMipmapLinear));
+        _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)SamplerFilter(minFilter, GLEnum.LinearMipmapLinear));
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)SamplerFilter(tex.MagFilter, GLEnum.Linear));
         _textureIds[index] = (int)id;
     }
@@ -976,6 +1015,12 @@ internal sealed unsafe class Renderer : IDisposable
         SetVec3("uGroundColor", ground);
         SetFloat("uEnvironmentIntensity", _presentation.EnvironmentIntensity);
         SetFloat("uEnvironmentRotation", _presentation.EnvironmentRotation * MathF.PI / 180f);
+        SetInt("uHasEnvironmentCubemap", _environmentCubemap != 0 ? 1 : 0);
+        SetInt("uEnvironmentCubemap", 13);
+        SetFloat("uEnvironmentMaxLod", _environmentMaxLod);
+        SetFloat("uCubemapIntensity", _presentation.CubemapIntensity);
+        _gl.ActiveTexture(TextureUnit.Texture13);
+        _gl.BindTexture(TextureTarget.TextureCubeMap, _environmentCubemap);
         SetFloat("uExposure", _presentation.Exposure);
         SetFloat("uBrightness", _presentation.Brightness);
         SetFloat("uContrast", _presentation.Contrast);
@@ -1427,6 +1472,7 @@ internal sealed unsafe class Renderer : IDisposable
             _suppressEmissive ? Vector3.Zero : m?.EmissiveFactor ?? Vector3.Zero);
         SetFloat("uEmissiveStrength", m?.EmissiveStrength ?? 1f);
         SetFloat("uNormalScale", m?.NormalScale ?? 1f);
+        SetFloat("uSpecularAntialiasing", _presentation.SpecularAntialiasing);
         SetFloat("uSkinDiffusion", BlendMaterialFamily.Matches(m?.Name, _presentation.SkinFamilies)
             ? _presentation.SkinDiffusion : 0f);
         SetFloat("uOcclusionStrength", m?.OcclusionStrength ?? 1f);
@@ -1556,6 +1602,11 @@ internal sealed unsafe class Renderer : IDisposable
             {
                 _gl.DeleteTexture((uint)id);
             }
+        }
+
+        if (_environmentCubemap != 0)
+        {
+            _gl.DeleteTexture(_environmentCubemap);
         }
 
         if (_jointPaletteTex != 0)

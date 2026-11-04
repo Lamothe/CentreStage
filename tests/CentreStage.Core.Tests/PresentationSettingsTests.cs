@@ -266,8 +266,53 @@ public class PresentationSettingsTests
         Assert.Equal(0.8f, settings.SkinDiffusion);
     }
 
+    [Theory]
+    [InlineData("CENTRESTAGE_SPECULAR_AA", 0f, 0f, 1f)]
+    [InlineData("CENTRESTAGE_CUBEMAP_INTENSITY", 8f, 0f, 128f)]
+    public void FilteringDiagnosticsValidateFiniteRanges(string name, float fallback, float min, float max)
+    {
+        foreach (var value in new[] { min, max })
+        {
+            var parsed = PresentationSettings.Parse(key => key == name ? value.ToString(CultureInfo.InvariantCulture) : null);
+            Assert.Equal(value, Number(parsed, name));
+        }
+        foreach (var text in new[] { "NaN", "Infinity", "-1", "9999" })
+        {
+            var warnings = new List<string>();
+            var parsed = PresentationSettings.Parse(key => key == name ? text : null, warnings.Add);
+            Assert.Equal(fallback, Number(parsed, name));
+            Assert.Single(warnings);
+        }
+    }
+
+    [Fact]
+    public void EnvironmentAndFilteringAreOptInAndRegisteredForPinnedRejection()
+    {
+        var defaults = new PresentationSettings();
+        Assert.False(defaults.TrilinearFiltering);
+        Assert.Equal(0f, defaults.SpecularAntialiasing);
+        Assert.Equal("", defaults.EnvironmentCubemap);
+        var parsed = PresentationSettings.Parse(key => key switch
+        {
+            "CENTRESTAGE_ENV_CUBEMAP" => "/tmp/environment.gz",
+            "CENTRESTAGE_TRILINEAR" => "1",
+            _ => null,
+        });
+        Assert.True(parsed.TrilinearFiltering);
+        Assert.Equal("/tmp/environment.gz", parsed.EnvironmentCubemap);
+        var warnings = new List<string>();
+        Assert.False(PresentationSettings.Parse(key => key == "CENTRESTAGE_TRILINEAR" ? "yes" : null, warnings.Add).TrilinearFiltering);
+        Assert.Single(warnings);
+        foreach (var name in new[] { "CENTRESTAGE_ENV_CUBEMAP", "CENTRESTAGE_CUBEMAP_INTENSITY", "CENTRESTAGE_SPECULAR_AA", "CENTRESTAGE_TRILINEAR" })
+        {
+            Assert.Contains(name, PresentationSettings.Variables);
+        }
+    }
+
     private static float Number(PresentationSettings settings, string name) => name switch
     {
+        "CENTRESTAGE_SPECULAR_AA" => settings.SpecularAntialiasing,
+        "CENTRESTAGE_CUBEMAP_INTENSITY" => settings.CubemapIntensity,
         "CENTRESTAGE_ENV_INTENSITY" => settings.EnvironmentIntensity,
         "CENTRESTAGE_FALLBACK_LIGHT" => settings.FallbackLightIntensity,
         "CENTRESTAGE_ENV_ROTATION" => settings.EnvironmentRotation,

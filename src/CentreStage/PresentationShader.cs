@@ -22,12 +22,27 @@ internal static class PresentationShader
     {
         var source = Replace(ShaderSources.Fragment, "#version 330 core", "#version 330 core\n" + StudioEnvironment.Glsl + "\n" + """
             uniform float uEnvironmentIntensity;
+            uniform int uHasEnvironmentCubemap;
+            uniform samplerCube uEnvironmentCubemap;
+            uniform float uEnvironmentMaxLod;
+            uniform float uCubemapIntensity;
+
+            vec3 environmentSpecular(vec3 direction, float roughness)
+            {
+                if (uHasEnvironmentCubemap != 0)
+                {
+                    return textureLod(uEnvironmentCubemap, direction,
+                        clamp(roughness, 0.0, 1.0) * uEnvironmentMaxLod).rgb * uCubemapIntensity;
+                }
+                return studioSpecular(direction, roughness);
+            }
             uniform float uEnvironmentRotation;
             uniform float uExposure;
             uniform float uBrightness;
             uniform float uContrast;
             uniform float uSaturation;
             uniform float uSkinDiffusion;
+            uniform float uSpecularAntialiasing;
 
             vec3 environmentDirection(vec3 d)
             {
@@ -35,6 +50,26 @@ internal static class PresentationShader
                 float s = sin(uEnvironmentRotation);
                 return vec3(c*d.x - s*d.z, d.y, s*d.x + c*d.z);
             }
+            """);
+        // Defer alpha masking until derivatives have been evaluated for the whole quad.
+        source = Replace(source, "if (uAlphaMode == 1 && base.a < uAlphaCutoff)", "if (uUnlit && uAlphaMode == 1 && base.a < uAlphaCutoff)");
+        source = Replace(source, "float transmission = uTransmissionFactor;", """
+            // Screen-space normal variance broadens unresolved specular lobes, not
+            // the normal map or albedo. Evaluate derivatives before divergent lighting.
+            vec3 normalDx = dFdx(n);
+            vec3 normalDy = dFdy(n);
+            float normalVariance = 0.15 * (dot(normalDx, normalDx) + dot(normalDy, normalDy));
+            float kernelRoughness = min(2.0 * normalVariance, 0.2) * uSpecularAntialiasing;
+            if (uSpecularAntialiasing > 0.0)
+            {
+                float alpha = roughness * roughness;
+                roughness = sqrt(sqrt(clamp(alpha * alpha + kernelRoughness, 0.0, 1.0)));
+            }
+            if (uAlphaMode == 1 && base.a < uAlphaCutoff)
+            {
+                discard;
+            }
+            float transmission = uTransmissionFactor;
             """);
         source = Replace(source,
             "vec3 ambient = mix(uGroundColor, uSkyColor, n.y * 0.5 + 0.5);", """
@@ -59,7 +94,7 @@ internal static class PresentationShader
             vec2 brdf = studioBrdf(NoV, environmentRoughness);
             vec3 envFresnel = f0 + (vec3(f90) - f0) * pow(1.0 - NoV, 5.0);
             color += ambient * base.rgb * (1.0 - metallic) * (1.0 - envFresnel);
-            color += studioSpecular(environmentDirection(reflect(-v, environmentNormal)), environmentRoughness)
+            color += environmentSpecular(environmentDirection(reflect(-v, environmentNormal)), environmentRoughness)
                 * uEnvironmentIntensity * (f0 * brdf.x + f90 * brdf.y) * horizon;
             // Clearcoat has its own dielectric environment lobe, above the base surface.
             float coatRoughness = clamp(uClearcoatRoughnessFactor, 0.04, 1.0);
@@ -69,7 +104,7 @@ internal static class PresentationShader
                     uvFor(uClearcoatRoughnessSet, uClearcoatRoughnessUv)).g, 0.04, 1.0);
             }
             vec2 coatBrdf = studioBrdf(NoV, coatRoughness);
-            color += clearcoat * studioSpecular(environmentDirection(reflect(-v, n)),
+            color += clearcoat * environmentSpecular(environmentDirection(reflect(-v, n)),
                 coatRoughness) * uEnvironmentIntensity
                 * (0.04 * coatBrdf.x + coatBrdf.y);
             """);

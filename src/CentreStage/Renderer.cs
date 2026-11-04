@@ -29,13 +29,6 @@ internal sealed unsafe class Renderer : IDisposable
     /// <summary>Texture unit for the captured opaque scene, sampled by transmission.</summary>
     private const int SceneColorUnit = 14;
 
-    /// <summary>
-    /// Screen offset per unit of view-space normal direction, for transmission. A head-on
-    /// normal gets no offset, so a flat window is a clean see-through and the strongest
-    /// bend sits at the rim of a curved shell, where refraction is strongest in reality.
-    /// </summary>
-    private const float DefaultRefractionScale = 0.02f;
-
     private readonly GL _gl;
     private readonly GltfModel _model;
     private readonly uint _program;
@@ -157,12 +150,15 @@ internal sealed unsafe class Renderer : IDisposable
         var refractionParsed = float.TryParse(refractionText,
             System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out var refraction);
+        // glTF transmission does not author a screen-space distortion distance.
+        // Do not invent a fixed bend for every shell; retain the old pinned path.
+        var defaultRefractionScale = _presentation.DefaultRefractionScale;
         _refractionScale = refractionParsed && refraction >= 0f && refraction <= 0.2f
             ? refraction
-            : DefaultRefractionScale;
+            : defaultRefractionScale;
         if (refractionText is { Length: > 0 } && !(refractionParsed && refraction >= 0f && refraction <= 0.2f))
         {
-            Console.WriteLine($"  refraction: '{refractionText}' is not a value in [0, 0.2] - using {DefaultRefractionScale:0.###}");
+            Console.WriteLine($"  refraction: '{refractionText}' is not a value in [0, 0.2] - using {defaultRefractionScale:0.###}");
         }
 
         // Opt-in alpha-test prepass for one blend material family. Unset, or a cutoff

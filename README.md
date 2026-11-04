@@ -318,6 +318,7 @@ off ignores it and retains 2.5. To reproduce the previous studio build exactly:
 
 ```sh
 CENTRESTAGE_FALLBACK_LIGHT=2.5 CENTRESTAGE_ENV_INTENSITY=0.8 \
+  CENTRESTAGE_SKIN_DIFFUSION=0.8 CENTRESTAGE_REFRACTION_SCALE=0.02 \
   CENTRESTAGE_SATURATION=0.65 CENTRESTAGE_CAMERA="350,16700,775,800,75,0" \
   dotnet run --no-build --project src/CentreStage -- \
   /home/michael/Downloads/Una-109b3c7b/Una.glb --capture previous-studio.png
@@ -352,6 +353,79 @@ read-only review passed. `linux/install.sh` completed, and the published Release
 capture is byte-identical to Debug. Raw captures/logs are in ignored
 `.evidence/sketchfab-followup/`. No neural inference/PSNR was rerun.
 
+### Local-detail correction and asset audit (04/11/2026)
+
+Michael's annotated eye/inner-corner/cheek comparison exposed defects that the
+whole-frame colour metrics did not catch. **The colour statistics above are not
+an acceptance test for eye anatomy, reflections or skin detail.**
+
+Two shipped defaults were counterproductive and are corrected:
+
+* `CENTRESTAGE_SKIN_DIFFUSION` now defaults to **0**, not 0.8. The heuristic
+  interpolates normal-mapped shading towards the smooth mesh normal and weakens
+  AO; it is not SSS and flattened the crease/cheek detail being sought. It remains
+  an explicit diagnostic, not a default skin treatment.
+* `CENTRESTAGE_REFRACTION_SCALE` now defaults to **0 in live studio mode**,
+  rather than inventing a 0.02-screen-extent displacement for every transmissive
+  surface. There is no authored optical path length in that heuristic. Legacy
+  presentation and pinned renderers keep 0.02. Valid explicit overrides still
+  work. This removes a source of eye-shell distortion, **not** a complete fix
+  for corneal reflection/refraction.
+
+Frozen camera and crop are unchanged from the earlier sections. Whole-crop
+metrics barely move, although local shading changes:
+
+| live default | grey mean | grey sd | HSL saturation | mean RGB |
+|---|---:|---:|---:|---|
+| previous (`c67482f`) | 0.719022 | 0.112090 | 0.190242 | (0.531513, 0.421423, 0.378563) |
+| no smoothing / no arbitrary bend | 0.718411 | 0.112449 | 0.189713 | (0.529705, 0.420170, 0.377560) |
+
+The fixed cheek patch `180x100+580+550` in the original 1280×800 capture has grey
+sd **0.015171 → 0.016465** (+8.5%). This is a local variation diagnostic, not a
+measure of lifelikeness or proof of correct texture reconstruction. The crease
+and eye still do not match. In particular, the full-transmission composite
+currently drops the reflected lobe; with no bend it remains a tinted screen
+copy, **not physically correct glass**. A tested reflection-retention experiment
+made this eye cloudy with the exported material parameters and was discarded.
+No reflection rewrite or invented per-asset specular correction was shipped.
+
+![Sketchfab, previous studio, corrected defaults (left to right)](docs/una-local-defects.png)
+
+**Asset audit**, reading the GLB JSON against the captured `options.json`:
+
+| setting | supplied Sketchfab scene | downloaded GLB |
+|---|---|---|
+| shell IOR (`ReflectionSclera`, `-`) | about 1.000023, 1.0 | no `KHR_materials_ior`; renderer correctly uses glTF default 1.5 |
+| Eye specular factor | 0 | no specular extension; glTF default applies |
+| skin specular | authored colour and factor 0.044398 | no specular extension |
+| skin AO strength | 0.885861 | 1 |
+| hair normal mapping | disabled | enabled, `Hair_T.png_flipY` |
+| SSS/profile/thickness | authored | absent, as already known |
+
+These are **material/export differences, not proof of corrupt geometry or image
+files**. Eye and skin normals/UVs/tangents exist; the skin normal map is uploaded
+as linear data, not mistakenly as sRGB. Normal-map green orientation needs to be
+judged against actual texture content, not flipped blindly. No GLB bytes were
+changed (MD5 remains `f79c7958c1a64c02f916f87895862a9d`), and no re-rip was made.
+Fixing renderer defaults cannot recover omitted authored material metadata.
+
+Remaining renderer limitations also matter: procedural studio lighting is not
+Sketchfab's HDR environment; AO currently multiplies specular/direct light too;
+and no spatial SSS, contact shading or correct layered corneal reflection exists.
+The annotated crease and cheek discrepancy are **not resolved** by these two
+safe corrections. Do not call the result a Sketchfab match.
+
+Verification: **217 tests passed**, zero build warnings/errors; all **46 pinned
+rasters byte-identical** to the preceding build. Explicit
+`CENTRESTAGE_REFRACTION_SCALE=0.02 CENTRESTAGE_SKIN_DIFFUSION=0.8` reproduces the
+preceding default PNG byte-for-byte. Independent read-only review passed the
+scoped corrections and identified the remaining rendering limitations above.
+The documented historical reproduction command was corrected after review to
+include both explicit old defaults. `linux/install.sh` completed; installed
+Release capture is byte-identical to the verified Debug capture.
+Raw isolations, including no-shell/no-bend/no-diffusion captures, are in ignored
+`.evidence/una-local-defects/`.
+
 ### Transmission
 
 `KHR_materials_transmission` used to mix towards the sky colour, which made any
@@ -381,7 +455,8 @@ path, and on Mégane and the default Una view the two builds are byte-identical
 whole model at 6193 units, where the eyes are far below a pixel).
 
 - `CENTRESTAGE_REFRACTION_SCALE=<n>` sets the screen offset along the normal, as a
-  fraction of the smaller viewport side, in [0, 0.2]. Default 0.02. Zero makes
+  fraction of the smaller viewport side, in [0, 0.2]. Defaults: studio 0,
+  legacy 0.02. Zero makes
   every transmissive surface a flat window; large values distort at the rim of a
   shell. An unusable explicit value is reported and the default is used.
 - `CENTRESTAGE_LEGACY_TRANSMISSION=1` restores the pre-change sky tint (the

@@ -14,7 +14,7 @@ public class PresentationSettingsTests
         { "CENTRESTAGE_BRIGHTNESS", 0.04f, -0.5f, 0.5f },
         { "CENTRESTAGE_CONTRAST", -0.12f, -1f, 1f },
         { "CENTRESTAGE_SATURATION", 0.73f, 0f, 2f },
-        { "CENTRESTAGE_SKIN_DIFFUSION", 0.8f, 0f, 1f },
+        { "CENTRESTAGE_SKIN_DIFFUSION", 0f, 0f, 1f },
     };
 
     public static IEnumerable<object[]> InvalidNumbers()
@@ -49,7 +49,7 @@ public class PresentationSettingsTests
         Assert.Equal(0.04f, settings.Brightness);
         Assert.Equal(-0.12f, settings.Contrast);
         Assert.Equal(0.73f, settings.Saturation);
-        Assert.Equal(0.8f, settings.SkinDiffusion);
+        Assert.Equal(0f, settings.SkinDiffusion);
         Assert.Equal("skin", settings.SkinFamilies);
     }
 
@@ -240,6 +240,30 @@ public class PresentationSettingsTests
         });
         Assert.Equal(2.5f, settings.EffectiveFallbackLightIntensity);
         Assert.Equal(2.5f, PresentationSettings.Legacy.EffectiveFallbackLightIntensity);
+    }
+
+    [Fact]
+    public void StudioDefaultsPreserveSurfaceDetailAndDoNotInventRefraction()
+    {
+        var settings = PresentationSettings.Parse(_ => null);
+        Assert.Equal(0f, settings.SkinDiffusion);
+        Assert.Equal(0f, settings.DefaultRefractionScale);
+    }
+
+    [Fact]
+    public void LegacyDefaultRefractionRemainsPinned()
+    {
+        Assert.Equal(0.02f, PresentationSettings.Legacy.DefaultRefractionScale);
+        Assert.Equal(0.02f, PresentationSettings.Parse(key =>
+            key == "CENTRESTAGE_PRESENTATION" ? "0" : null).DefaultRefractionScale);
+    }
+
+    [Fact]
+    public void SurfaceSmoothingRemainsExplicitlyAvailable()
+    {
+        var settings = PresentationSettings.Parse(key =>
+            key == "CENTRESTAGE_SKIN_DIFFUSION" ? "0.8" : null);
+        Assert.Equal(0.8f, settings.SkinDiffusion);
     }
 
     private static float Number(PresentationSettings settings, string name) => name switch

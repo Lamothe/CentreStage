@@ -13,11 +13,15 @@ public sealed record PresentationSettings
     public float Brightness { get; init; } = 0.04f;
     public float Contrast { get; init; } = -0.12f;
     public float Saturation { get; init; } = 0.73f;
-    public float SkinDiffusion { get; init; } = 0.8f;
+    public float SkinDiffusion { get; init; } = 0f;
     public string SkinFamilies { get; init; } = "skin";
 
+    /// <summary>Do not invent a screen-space optical distance for live glass.
+    /// The legacy offset is retained for pinned evidence.</summary>
+    public float DefaultRefractionScale => Enabled ? 0f : 0.02f;
+
     /// <summary>Do not add a synthetic hard key on top of IBL unless requested.
-    /// Legacy/pinned views must retain exactly their original light intensity.</summary>
+    /// Legacy/pinned views retain their original light intensity.</summary>
     public float EffectiveFallbackLightIntensity => Enabled ? FallbackLightIntensity : 2.5f;
 
     public static PresentationSettings Legacy { get; } = new() { Enabled = false, SkinDiffusion = 0f };

@@ -23,8 +23,13 @@ internal static class ScenePairCapture
         "CENTRESTAGE_AUTO_CLOSE_MS", "CENTRESTAGE_SYNTH_CLICK", "CENTRESTAGE_SYNTH_MENU",
         "CENTRESTAGE_SYNTH_MENU_SHOT", "CENTRESTAGE_CTL_FIFO", "CENTRESTAGE_DLSS_SYNTHETIC",
         "CENTRESTAGE_DLSS_EXTREME", "CENTRESTAGE_DLSS_FAULT", "CENTRESTAGE_MSAA",
-        "CENTRESTAGE_HAIR_COVERAGE", "CENTRESTAGE_BLEND_CUTOUT", "CENTRESTAGE_BLEND_CUTOUT_MATERIAL",
-        "CENTRESTAGE_BLEND_BOOST", "CENTRESTAGE_BLEND_BOOST_MATERIAL", "CENTRESTAGE_HIDE_BLEND"
+        // CENTRESTAGE_HAIR_COVERAGE is deliberately absent: it only adds coverage dumps to
+        // the face sweep and never changes a draw, and listing it here made the documented
+        // coverage measurement impossible - the caller rejected the variable it needs.
+        "CENTRESTAGE_BLEND_CUTOUT", "CENTRESTAGE_BLEND_CUTOUT_MATERIAL",
+        "CENTRESTAGE_BLEND_BOOST", "CENTRESTAGE_BLEND_BOOST_MATERIAL", "CENTRESTAGE_HIDE_BLEND",
+        "CENTRESTAGE_NO_EMISSIVE", "CENTRESTAGE_LEGACY_TRANSMISSION",
+        "CENTRESTAGE_HIDE_TRANSMISSIVE", "CENTRESTAGE_REFRACTION_SCALE"
     ];
 
     // Entire camera trajectories and lighting conditions are disjoint across splits.
@@ -108,13 +113,7 @@ internal static class ScenePairCapture
                 throw new ArgumentException(
                     "usage: CentreStage <snapshot.glb> --scene-pairs|--scene-face-pairs <new-directory>");
             }
-            foreach (var name in DiagnosticVariables)
-            {
-                if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name)))
-                {
-                    throw new InvalidOperationException($"unset diagnostic variable {name} before capture");
-                }
-            }
+            RejectDiagnosticVariables();
             if (!OperatingSystem.IsLinux())
             {
                 throw new PlatformNotSupportedException("exclusive capture-directory creation requires Linux");
@@ -149,7 +148,7 @@ internal static class ScenePairCapture
     /// </summary>
     internal static void RejectDiagnosticVariables()
     {
-        foreach (var name in DiagnosticVariables)
+        foreach (var name in DiagnosticVariables.Concat(PresentationSettings.Variables))
         {
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name)))
             {
@@ -213,8 +212,8 @@ internal static class ScenePairCapture
             // UploadTextures consumes the array slots. Clone the references before the
             // first constructor so both renderers receive the identical decoded images.
             var cheapDecoded = (StbImageSharp.ImageResult?[])decoded.Clone();
-            full = new Renderer(gl, model, decoded, animate: false, cheapScene: false);
-            cheap = new Renderer(gl, model, cheapDecoded, animate: false, cheapScene: true);
+            full = new Renderer(gl, model, decoded, animate: false, cheapScene: false, pinnedEvidence: true);
+            cheap = new Renderer(gl, model, cheapDecoded, animate: false, cheapScene: true, pinnedEvidence: true);
             if (full.Bounds != cheap.Bounds)
             {
                 throw new InvalidOperationException("renderer geometry bounds differ");

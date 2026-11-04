@@ -352,6 +352,24 @@ internal static class Program
             renderer = new Renderer(gl, model, decoded, animate);
             camera.SetFrameAspect(1280f / 800f);
             camera.FrameBounds(renderer.Bounds.min, renderer.Bounds.max);
+
+            // Evidence capture at a fixed pose: CENTRESTAGE_CAMERA="x,y,z,distance,yawDeg,pitchDeg"
+            // overrides the bounding-box fit, so two builds can be compared on exactly the
+            // same view of a detail the fit cannot reach (an eye, a fitting).
+            if (Environment.GetEnvironmentVariable("CENTRESTAGE_CAMERA") is { Length: > 0 } cameraText
+                && cameraText.Split(',') is [var tx, var ty, var tz, var dist, var yaw, var pitch]
+                && float.TryParse(tx, NumberStyles.Float, CultureInfo.InvariantCulture, out var cx)
+                && float.TryParse(ty, NumberStyles.Float, CultureInfo.InvariantCulture, out var cy)
+                && float.TryParse(tz, NumberStyles.Float, CultureInfo.InvariantCulture, out var cz)
+                && float.TryParse(dist, NumberStyles.Float, CultureInfo.InvariantCulture, out var cd)
+                && float.TryParse(yaw, NumberStyles.Float, CultureInfo.InvariantCulture, out var cyaw)
+                && float.TryParse(pitch, NumberStyles.Float, CultureInfo.InvariantCulture, out var cpitch))
+            {
+                camera.Focus(new Vector3(cx, cy, cz), cd);
+                camera.Yaw = cyaw * MathF.PI / 180f;
+                camera.Pitch = cpitch * MathF.PI / 180f;
+            }
+
             Console.WriteLine($"  bounds: ({renderer.Bounds.min:F2}) .. ({renderer.Bounds.max:F2})");
             Console.WriteLine($"  camera: pos=({camera.Position:F2}) dist={camera.Distance:F2}");
 

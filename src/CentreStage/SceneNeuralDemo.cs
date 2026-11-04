@@ -101,8 +101,8 @@ internal static class SceneNeuralDemo
                 // UploadTextures consumes the array slots, so the cheap renderer gets the
                 // only clone; the original goes to the full renderer and is then empty.
                 var cheapDecoded = (StbImageSharp.ImageResult?[])decoded.Clone();
-                fullRenderer = new Renderer(gl, model, decoded, animate: false, cheapScene: false);
-                cheapRenderer = new Renderer(gl, model, cheapDecoded, animate: false, cheapScene: true);
+                fullRenderer = new Renderer(gl, model, decoded, animate: false, cheapScene: false, pinnedEvidence: true);
+                cheapRenderer = new Renderer(gl, model, cheapDecoded, animate: false, cheapScene: true, pinnedEvidence: true);
                 if (fullRenderer.Bounds != cheapRenderer.Bounds)
                 {
                     throw new InvalidOperationException("renderer geometry bounds differ");

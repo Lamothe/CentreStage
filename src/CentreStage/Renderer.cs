@@ -14,8 +14,27 @@ internal sealed unsafe class Renderer : IDisposable
 {
     private const int MaxLights = 4;
 
+    /// <summary>
+    /// Coverage folded into each hair fragment by default: alpha' = 1-(1-alpha)^3.
+    /// Measured on a hair-card stack whose authored alpha composites to well under one:
+    /// k = 3 sits within a luma level of a fully opaque hair reference and raises edge
+    /// energy rather than flattening the strands. Override with
+    /// <c>CENTRESTAGE_BLEND_BOOST</c> (1 disables, up to 8).
+    /// </summary>
+    private const float DefaultHairOpacityBoost = 3f;
+
     /// <summary>Texture unit for the joint palette buffer texture; material slots use 0..11.</summary>
     private const int JointPaletteUnit = 15;
+
+    /// <summary>Texture unit for the captured opaque scene, sampled by transmission.</summary>
+    private const int SceneColorUnit = 14;
+
+    /// <summary>
+    /// Screen offset per unit of view-space normal direction, for transmission. A head-on
+    /// normal gets no offset, so a flat window is a clean see-through and the strongest
+    /// bend sits at the rim of a curved shell, where refraction is strongest in reality.
+    /// </summary>
+    private const float DefaultRefractionScale = 0.02f;
 
     private readonly GL _gl;
     private readonly GltfModel _model;
@@ -45,16 +64,44 @@ internal sealed unsafe class Renderer : IDisposable
     private float[] _depthScratch = Array.Empty<float>();
     private ulong[] _sortKeys = Array.Empty<ulong>();
 
-    // Optional alpha-test prepass for one blend material family (see
+    // Optional alpha-test prepass for a set of blend material families (see
     // DrawBlendCutoutPrepass). Cutoff 0 keeps the pre-change single-pass path exactly.
     private readonly float _blendCutoutCutoff;
-    private readonly string _blendCutoutPrefix;
+    private readonly string[] _blendCutoutFamilies;
     private readonly float _blendOpacityBoost;
-    private readonly string _blendOpacityPrefix;
+    private readonly string[] _blendOpacityFamilies;
 
-    // Measurement aid: suppress one blend material family entirely, to separate "the
+    // Measurement aid: suppress a blend material family entirely, to separate "the
     // hair is too transparent" from "the hair does not cover that part of the head".
-    private readonly string? _hiddenBlendPrefix;
+    private readonly string[]? _hiddenBlendFamilies;
+
+    // Diagnostic: drop every material's emissive term (see CENTRESTAGE_NO_EMISSIVE).
+    private readonly bool _suppressEmissive = Environment.GetEnvironmentVariable("CENTRESTAGE_NO_EMISSIVE") == "1";
+
+    // Transmission: transmissive primitives are deferred out of the opaque pass so the
+    // fragment can sample the opaque scene behind it (see DrawTransmissivePass).
+    // CENTRESTAGE_LEGACY_TRANSMISSION=1 restores the sky-tint approximation, and
+    // CENTRESTAGE_REFRACTION_SCALE tunes the screen-space bend.
+    private readonly bool _legacyTransmission =
+        Environment.GetEnvironmentVariable("CENTRESTAGE_LEGACY_TRANSMISSION") == "1";
+
+    /// <summary>Pinned-evidence renderers keep the pre-change shading path outright.</summary>
+    private readonly bool _pinnedEvidence;
+    private readonly PresentationSettings _presentation;
+
+    // Measurement aid: skip transmissive primitives entirely, to see what a glass surface
+    // is covering (an eye under a cornea, a room behind a window).
+    private readonly bool _hideTransmissive =
+        Environment.GetEnvironmentVariable("CENTRESTAGE_HIDE_TRANSMISSIVE") == "1";
+
+    private readonly float _refractionScale;
+
+    /// <summary>Set by <see cref="UploadGeometry"/> once the primitives and materials are known.</summary>
+    private bool _hasTransmissive;
+    private uint _sceneColorTex;
+    private uint _sceneFbo;
+    private int _sceneTexWidth;
+    private int _sceneTexHeight;
 
     private static readonly int[] SamplerWraps = { 10497, 33071, 33648 }; // repeat, clamp, mirrored
 
@@ -83,10 +130,40 @@ internal sealed unsafe class Renderer : IDisposable
         public uint[]? SortedIndices;
     }
 
-    public Renderer(GL gl, GltfModel model, ImageResult?[]? decodedTextures = null, bool animate = true, bool cheapScene = false)
+    /// <summary>
+    /// OpenGL renderer for a GltfModel: draws each node's primitives with per-material
+    /// uniforms. <paramref name="pinnedEvidence"/> keeps the exact pre-change shading
+    /// path — the blend-opacity boost off and transmission on the sky-tint
+    /// approximation — for the neural demo frames and training pairs, which are pinned
+    /// by SHA-256 and the PSNRs they print; live viewing and <c>--capture</c> use the
+    /// current path. The gate is in code, not inferred from the asset, so a pinned
+    /// snapshot with glass in it cannot drift.
+    /// </summary>
+    public Renderer(GL gl, GltfModel model, ImageResult?[]? decodedTextures = null, bool animate = true,
+        bool cheapScene = false, bool pinnedEvidence = false)
     {
         _gl = gl;
         _model = model;
+        _pinnedEvidence = pinnedEvidence;
+        _presentation = pinnedEvidence ? PresentationSettings.Legacy : PresentationSettings.FromEnvironment();
+        if (!pinnedEvidence)
+        {
+            Console.WriteLine(_presentation.Enabled
+                ? FormattableString.Invariant($"  presentation: studio intensity={_presentation.EnvironmentIntensity:0.###}, rotation={_presentation.EnvironmentRotation:0.###}deg, exposure={_presentation.Exposure:0.###} stops, brightness={_presentation.Brightness:0.###}, contrast={_presentation.Contrast:0.###}, saturation={_presentation.Saturation:0.###}, diffusion={_presentation.SkinDiffusion:0.###} ({_presentation.SkinFamilies})")
+                : "  presentation: legacy hemispheric lighting/tones");
+        }
+
+        var refractionText = Environment.GetEnvironmentVariable("CENTRESTAGE_REFRACTION_SCALE");
+        var refractionParsed = float.TryParse(refractionText,
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var refraction);
+        _refractionScale = refractionParsed && refraction >= 0f && refraction <= 0.2f
+            ? refraction
+            : DefaultRefractionScale;
+        if (refractionText is { Length: > 0 } && !(refractionParsed && refraction >= 0f && refraction <= 0.2f))
+        {
+            Console.WriteLine($"  refraction: '{refractionText}' is not a value in [0, 0.2] - using {DefaultRefractionScale:0.###}");
+        }
 
         // Opt-in alpha-test prepass for one blend material family. Unset, or a cutoff
         // outside (0,1), leaves the pre-change single-pass blend path untouched.
@@ -97,31 +174,70 @@ internal sealed unsafe class Renderer : IDisposable
             && cutoutCutoff > 0f && cutoutCutoff < 1f
                 ? cutoutCutoff
                 : 0f;
-        _blendCutoutPrefix =
-            Environment.GetEnvironmentVariable("CENTRESTAGE_BLEND_CUTOUT_MATERIAL") ?? "hair";
+        // Family lists: an unset, empty or whitespace-only value falls back to the default.
+        static string[] Families(string name) =>
+            BlendMaterialFamily.Parse(Environment.GetEnvironmentVariable(name)) is { Length: > 0 } parsed
+                ? parsed
+                : BlendMaterialFamily.Parse(BlendMaterialFamily.Hair);
 
-        // Opt-in opacity remap for one blend material family: alpha' = 1-(1-alpha)^k,
-        // which folds k cards' worth of coverage into each fragment. k of 1 (or a value
-        // outside (1, 8]) leaves the shader's default path untouched.
-        _blendOpacityBoost =
-            float.TryParse(Environment.GetEnvironmentVariable("CENTRESTAGE_BLEND_BOOST"),
+        _blendCutoutFamilies = Families("CENTRESTAGE_BLEND_CUTOUT_MATERIAL");
+
+        // Hair opacity remap: alpha' = 1-(1-alpha)^k, which folds k cards' worth of
+        // coverage into each fragment. k of 1 (or a value outside (1, 8]) leaves the
+        // shader's default path untouched. On by default for the hair family because a
+        // hair card stack at the authored alpha composites to well under one and the
+        // skin under the parting shows through; the pinned evidence renders keep k = 1.
+        // An explicit but unusable value is reported rather than silently turning the
+        // shipped default off.
+        var boostText = Environment.GetEnvironmentVariable("CENTRESTAGE_BLEND_BOOST");
+        if (boostText is null)
+        {
+            _blendOpacityBoost = pinnedEvidence ? 1f : DefaultHairOpacityBoost;
+        }
+        else
+        {
+            _blendOpacityBoost = float.TryParse(boostText,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var boost)
-            && boost > 1f && boost <= 8f
-                ? boost
-                : 1f;
-        _blendOpacityPrefix =
-            Environment.GetEnvironmentVariable("CENTRESTAGE_BLEND_BOOST_MATERIAL") ?? "hair";
-        _hiddenBlendPrefix = Environment.GetEnvironmentVariable("CENTRESTAGE_HIDE_BLEND");
-        if (_blendOpacityBoost > 1f)
+                && boost > 1f && boost <= 8f
+                    ? boost
+                    : 1f;
+            if (_blendOpacityBoost == 1f && boostText.Trim() != "1")
+            {
+                Console.WriteLine($"  blend boost: '{boostText}' is not a value in (1, 8] - boost disabled");
+            }
+        }
+
+        _blendOpacityFamilies = Families("CENTRESTAGE_BLEND_BOOST_MATERIAL");
+        _hiddenBlendFamilies = BlendMaterialFamily.Parse(
+            Environment.GetEnvironmentVariable("CENTRESTAGE_HIDE_BLEND")) is { Length: > 0 } hidden
+                ? hidden
+                : null;
+        if (_blendOpacityBoost > 1f && _blendOpacityFamilies.Length > 0)
         {
+            // Name the materials that actually matched: a family entry that matches
+            // nothing (a misspelling, a separator inside an entry) is otherwise invisible
+            // and the crown just stays bald.
+            var matched = new List<string>();
+            foreach (var material in model.Materials)
+            {
+                if (material.Name is { Length: > 0 } name
+                    && BlendMaterialFamily.Matches(name, _blendOpacityFamilies))
+                {
+                    matched.Add(name);
+                }
+            }
+
             Console.WriteLine($"  blend boost: alpha remapped by 1-(1-a)^{_blendOpacityBoost:0.0} "
-                + $"for materials named '{_blendOpacityPrefix}*'");
+                + $"for material-name tokens {string.Join(",", _blendOpacityFamilies)}");
+            Console.WriteLine(matched.Count == 0
+                ? "  blend boost: matched no material - check the family list"
+                : $"  blend boost: matched {matched.Count} material(s): {string.Join(", ", matched)}");
         }
         if (_blendCutoutCutoff > 0f)
         {
             Console.WriteLine($"  blend cutout: alpha >= {_blendCutoutCutoff:0.00} for materials named "
-                + $"'{_blendCutoutPrefix}*' draws opaque before the blend pass");
+                + $"'{string.Join(",", _blendCutoutFamilies)}' draws opaque before the blend pass");
         }
 
         _program = BuildProgram(cheapScene);
@@ -239,7 +355,8 @@ internal sealed unsafe class Renderer : IDisposable
         }
 
         var vs = Compile(ShaderType.VertexShader, ShaderSources.Vertex);
-        var fs = Compile(ShaderType.FragmentShader, cheapScene ? ShaderSources.CheapFragment : ShaderSources.Fragment);
+        var fs = Compile(ShaderType.FragmentShader, cheapScene ? ShaderSources.CheapFragment
+            : _pinnedEvidence || !_presentation.Enabled ? ShaderSources.Fragment : PresentationShader.Fragment);
         var program = _gl.CreateProgram();
         _gl.AttachShader(program, vs);
         _gl.AttachShader(program, fs);
@@ -313,6 +430,7 @@ internal sealed unsafe class Renderer : IDisposable
     {
         var tex = _model.Textures[index];
         var id = _gl.GenTexture();
+        _gl.ActiveTexture(TextureUnit.Texture0);
         _gl.BindTexture(TextureTarget.Texture2D, id);
         // Colour textures are sRGB-encoded in the file; sampling from an sRGB internal
         // format decodes them to linear so lighting runs in linear space and the output
@@ -618,7 +736,21 @@ internal sealed unsafe class Renderer : IDisposable
         }
 
         Bounds = any ? (min, max) : (Vector3.Zero, Vector3.One);
+
+        // Known up front from the materials: decides whether the opaque pass has to be
+        // split so transmission can sample what is behind it.
+        _hasTransmissive = _primitives.Any(p => IsTransmissive(p.MaterialIndex));
+        if (_hasTransmissive && !_legacyTransmission)
+        {
+            Console.WriteLine($"  transmission: {_primitives.Count(p => IsTransmissive(p.MaterialIndex))} "
+                + $"primitive(s) sample the scene (refraction scale {_refractionScale:0.###})");
+        }
     }
+
+    private bool IsTransmissive(int materialIndex) =>
+        materialIndex >= 0 && materialIndex < _model.Materials.Count
+        && (_model.Materials[materialIndex].TransmissionFactor > 0f
+            || _model.Materials[materialIndex].TransmissionTexture is not null);
 
     /// <summary>World transform of a joint node, from the model's complete node-world map.</summary>
     private Matrix4x4 JointWorld(int nodeIndex)
@@ -806,7 +938,7 @@ internal sealed unsafe class Renderer : IDisposable
     /// </summary>
     public void Draw(OrbitCamera camera, float aspect, IReadOnlyList<RuntimeLight> lights, Vector3 sky, Vector3 ground, ScenePose? pose = null)
     {
-        DrawCore(camera, aspect, lights, sky, ground, pose, coverage: false, blendMaterialPrefix: null);
+        DrawCore(camera, aspect, lights, sky, ground, pose, coverage: false, blendMaterialFamily: null);
     }
 
     /// <summary>
@@ -814,18 +946,20 @@ internal sealed unsafe class Renderer : IDisposable
     /// blended primitives in front of it and leaves their accumulated coverage in the
     /// alpha channel (the colour channels are not meaningful). A pixel that never sees
     /// a blend fragment stays at alpha 0; a pixel covered by an opaque layer reaches 1.
-    /// The caller must supply an RGBA target. <paramref name="blendMaterialPrefix"/>
+    /// The caller must supply an RGBA target. <paramref name="blendMaterialFamily"/>
     /// optionally restricts the measurement to one material family (for example "hair").
     /// </summary>
     public void DrawCoverage(OrbitCamera camera, float aspect, IReadOnlyList<RuntimeLight> lights,
-        Vector3 sky, Vector3 ground, ScenePose? pose = null, string? blendMaterialPrefix = null)
+        Vector3 sky, Vector3 ground, ScenePose? pose = null, string? blendMaterialFamily = null)
     {
-        DrawCore(camera, aspect, lights, sky, ground, pose, coverage: true, blendMaterialPrefix);
+        DrawCore(camera, aspect, lights, sky, ground, pose, coverage: true, blendMaterialFamily);
     }
 
     private void DrawCore(OrbitCamera camera, float aspect, IReadOnlyList<RuntimeLight> lights,
-        Vector3 sky, Vector3 ground, ScenePose? pose, bool coverage, string? blendMaterialPrefix)
+        Vector3 sky, Vector3 ground, ScenePose? pose, bool coverage, string? blendMaterialFamily)
     {
+        // Parsed once per frame rather than per primitive.
+        var coverageFamilies = blendMaterialFamily is null ? null : BlendMaterialFamily.Parse(blendMaterialFamily);
         // Alpha-to-coverage needs a multisampled draw framebuffer. Key on the
         // framebuffer actually bound, not on a global flag: the demo captures render
         // into their own single-sample FBOs, so they keep the exact blending they
@@ -844,6 +978,12 @@ internal sealed unsafe class Renderer : IDisposable
         SetVec3("uCameraPos", camera.Position);
         SetVec3("uSkyColor", sky);
         SetVec3("uGroundColor", ground);
+        SetFloat("uEnvironmentIntensity", _presentation.EnvironmentIntensity);
+        SetFloat("uEnvironmentRotation", _presentation.EnvironmentRotation * MathF.PI / 180f);
+        SetFloat("uExposure", _presentation.Exposure);
+        SetFloat("uBrightness", _presentation.Brightness);
+        SetFloat("uContrast", _presentation.Contrast);
+        SetFloat("uSaturation", _presentation.Saturation);
 
         UploadLights(lights);
 
@@ -890,10 +1030,22 @@ internal sealed unsafe class Renderer : IDisposable
             _ordered.AddRange(_primitives);
         }
 
+        // Transmissive primitives leave the opaque pass so they can be drawn against a copy
+        // of the scene behind them; without a copy (legacy path, or the coverage pass,
+        // which only wants hair depth) they stay in the opaque pass and keep the old
+        // sky-tint approximation.
+        var deferTransmission = !_legacyTransmission && !_pinnedEvidence && _hasTransmissive && !coverage;
+        var skipTransmission = deferTransmission || _hideTransmissive;
+
         foreach (var pass in new[] { AlphaMode.Opaque, AlphaMode.Blend })
         {
             if (pass == AlphaMode.Blend)
             {
+                if (deferTransmission && !_hideTransmissive)
+                {
+                    DrawTransmissivePass(pose, view);
+                }
+
                 if (!coverage && _blendCutoutCutoff > 0f)
                 {
                     DrawBlendCutoutPrepass(pose, view);
@@ -939,14 +1091,19 @@ internal sealed unsafe class Renderer : IDisposable
                     continue;
                 }
 
-                if (coverage && pass == AlphaMode.Blend && blendMaterialPrefix is not null
-                    && !BlendMaterialMatches(prim.MaterialIndex, blendMaterialPrefix))
+                if (pass == AlphaMode.Opaque && skipTransmission && IsTransmissive(prim.MaterialIndex))
                 {
                     continue;
                 }
 
-                if (pass == AlphaMode.Blend && _hiddenBlendPrefix is not null
-                    && BlendMaterialMatches(prim.MaterialIndex, _hiddenBlendPrefix))
+                if (coverage && pass == AlphaMode.Blend && coverageFamilies is not null
+                    && !BlendMaterialMatches(prim.MaterialIndex, coverageFamilies))
+                {
+                    continue;
+                }
+
+                if (pass == AlphaMode.Blend && _hiddenBlendFamilies is not null
+                    && BlendMaterialMatches(prim.MaterialIndex, _hiddenBlendFamilies))
                 {
                     continue;
                 }
@@ -970,10 +1127,141 @@ internal sealed unsafe class Renderer : IDisposable
         _gl.ColorMask(true, true, true, true);
     }
 
-    private bool BlendMaterialMatches(int materialIndex, string prefix)
+    /// <summary>
+    /// Draws the transmissive primitives after the opaque pass, sampling the colour that
+    /// is actually behind them instead of the sky.
+    ///
+    /// Splitting the opaque pass is what makes the sample valid: a transmissive shell
+    /// drawn in pass one would read its own pixel, or a pixel the eye behind it had not
+    /// written yet. The capture holds opaque geometry only; blended material in front of
+    /// glass still draws afterwards, in sorted order, and depth-tests against the glass,
+    /// so it composites normally. Glass that is itself behind blended geometry is the one
+    /// case this ordering cannot serve, and was already approximated before.
+    /// </summary>
+    private void DrawTransmissivePass(ScenePose? pose, Matrix4x4 view)
+    {
+        // A failed capture must not drop the surface: the shader falls back to the
+        // pre-change sky tint when uHasSceneColor is 0, which is what the legacy path
+        // uses anyway. Drawing unconditionally is what keeps a glass surface visible
+        // on a driver that refuses the blit.
+        var captured = CaptureSceneColor();
+        SetInt("uHasSceneColor", captured ? 1 : 0);
+        SetFloat("uRefractionScale", _refractionScale);
+        foreach (var prim in _primitives)
+        {
+            if (prim.AlphaMode != AlphaMode.Opaque || !IsTransmissive(prim.MaterialIndex))
+            {
+                continue;
+            }
+
+            DrawPrimitive(prim, pose, view, sortIsDirty: false);
+        }
+
+        SetInt("uHasSceneColor", 0);
+    }
+
+    /// <summary>
+    /// Copies the colour currently in the bound draw framebuffer into the refraction
+    /// texture, resolving multisampling through the blit (a copy straight out of a
+    /// multisampled buffer is not allowed). Returns false, leaving the shader on the
+    /// sky-tint fallback, when the viewport is empty or taller/wider than the driver's
+    /// texture limit.
+    /// </summary>
+    private bool CaptureSceneColor()
+    {
+        Span<int> viewport = stackalloc int[4];
+        _gl.GetInteger(GetPName.Viewport, viewport);
+        var x = viewport[0];
+        var y = viewport[1];
+        var width = viewport[2];
+        var height = viewport[3];
+        if (width <= 0 || height <= 0)
+        {
+            return false;
+        }
+
+        var maxSize = _gl.GetInteger(GetPName.MaxTextureSize);
+        if (width > maxSize || height > maxSize)
+        {
+            return false;
+        }
+
+        if (_sceneColorTex == 0)
+        {
+            _sceneColorTex = _gl.GenTexture();
+            _sceneFbo = _gl.GenFramebuffer();
+        }
+
+        // Whatever the caller bound for drawing may not be framebuffer 0: the demo
+        // renderers draw into their own single-sample FBOs. Save both bindings and put
+        // them back, so creating or resizing the copy cannot leak a binding.
+        var source = (uint)_gl.GetInteger(GetPName.DrawFramebufferBinding);
+        var readSource = (uint)_gl.GetInteger(GetPName.ReadFramebufferBinding);
+
+        if (width != _sceneTexWidth || height != _sceneTexHeight)
+        {
+            _gl.BindTexture(TextureTarget.Texture2D, _sceneColorTex);
+            _gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgba8, (uint)width, (uint)height,
+                0, PixelFormat.Rgba, PixelType.UnsignedByte, null);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter,
+                (int)TextureMinFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter,
+                (int)TextureMagFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS,
+                (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT,
+                (int)TextureWrapMode.ClampToEdge);
+            _gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, readSource);
+            _gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, _sceneFbo);
+            _gl.FramebufferTexture2D(FramebufferTarget.DrawFramebuffer, FramebufferAttachment.ColorAttachment0,
+                TextureTarget.Texture2D, _sceneColorTex, 0);
+            var complete = _gl.CheckFramebufferStatus(FramebufferTarget.DrawFramebuffer)
+                == GLEnum.FramebufferComplete;
+            _gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, readSource);
+            _gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, source);
+            _sceneTexWidth = width;
+            _sceneTexHeight = height;
+            if (!complete)
+            {
+                _sceneTexWidth = 0;
+                _sceneTexHeight = 0;
+                return false;
+            }
+        }
+
+        // Clear any earlier error so the check below only judges the blit. A blit whose
+        // source and destination internal formats differ is INVALID_OPERATION and copies
+        // nothing, which would leave the texture uninitialised while the shader samples
+        // it as real colour; returning false keeps the sky-tint fallback instead.
+        for (var i = 0; i < 8 && _gl.GetError() != GLEnum.NoError; i++)
+        {
+        }
+
+        _gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, source);
+        _gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, _sceneFbo);
+        _gl.BlitFramebuffer(x, y, x + width, y + height, 0, 0, width, height,
+            ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
+        var blitError = _gl.GetError();
+        _gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, readSource);
+        _gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, source);
+        if (blitError != GLEnum.NoError)
+        {
+            return false;
+        }
+
+        _gl.ActiveTexture(TextureUnit.Texture0 + SceneColorUnit);
+        _gl.BindTexture(TextureTarget.Texture2D, _sceneColorTex);
+        SetInt("uSceneColor", SceneColorUnit);
+        SetVec2("uSceneTexel", 1f / width, 1f / height);
+        SetVec2("uSceneOrigin", x, y);
+        SetFloat("uSceneExtent", Math.Min(width, height));
+        return true;
+    }
+
+    private bool BlendMaterialMatches(int materialIndex, ReadOnlySpan<string> families)
     {
         return materialIndex >= 0 && materialIndex < _model.Materials.Count
-            && _model.Materials[materialIndex].Name?.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) == true;
+            && BlendMaterialFamily.Matches(_model.Materials[materialIndex].Name, families);
     }
 
     /// <summary>
@@ -1002,7 +1290,7 @@ internal sealed unsafe class Renderer : IDisposable
         foreach (var prim in _ordered)
         {
             if (prim.AlphaMode != AlphaMode.Blend
-                || !BlendMaterialMatches(prim.MaterialIndex, _blendCutoutPrefix))
+                || !BlendMaterialMatches(prim.MaterialIndex, _blendCutoutFamilies))
             {
                 continue;
             }
@@ -1136,16 +1424,22 @@ internal sealed unsafe class Renderer : IDisposable
         SetFloat("uClearcoatRoughnessFactor", m?.ClearcoatRoughnessFactor ?? 0f);
         SetVec3("uSheenColorFactor", m?.SheenColorFactor ?? Vector3.Zero);
         SetFloat("uSheenRoughnessFactor", m?.SheenRoughnessFactor ?? 1f);
-        SetVec3("uEmissiveFactor", m?.EmissiveFactor ?? Vector3.Zero);
+        // Diagnostic: CENTRESTAGE_NO_EMISSIVE=1 drops every material's emissive term. An
+        // asset whose exporter invented emission (factor 1 over a reflection map) then
+        // reads correctly, which separates "the glTF says glow" from "the renderer does".
+        SetVec3("uEmissiveFactor",
+            _suppressEmissive ? Vector3.Zero : m?.EmissiveFactor ?? Vector3.Zero);
         SetFloat("uEmissiveStrength", m?.EmissiveStrength ?? 1f);
         SetFloat("uNormalScale", m?.NormalScale ?? 1f);
+        SetFloat("uSkinDiffusion", BlendMaterialFamily.Matches(m?.Name, _presentation.SkinFamilies)
+            ? _presentation.SkinDiffusion : 0f);
         SetFloat("uOcclusionStrength", m?.OcclusionStrength ?? 1f);
         SetInt("uAlphaMode", (int)(m?.AlphaMode ?? AlphaMode.Opaque));
         SetFloat("uAlphaCutoff", m?.AlphaCutoff ?? 0.5f);
         // The shader only consults this when uAlphaMode == 2, so the cutout prepass
         // (which overrides the mode to mask) is unaffected.
         SetFloat("uAlphaBoost",
-            _blendOpacityBoost > 1f && BlendMaterialMatches(materialIndex, _blendOpacityPrefix)
+            _blendOpacityBoost > 1f && BlendMaterialMatches(materialIndex, _blendOpacityFamilies)
                 ? _blendOpacityBoost
                 : 1f);
         SetInt("uUnlit", m?.Unlit == true ? 1 : 0);
@@ -1214,6 +1508,7 @@ internal sealed unsafe class Renderer : IDisposable
 
     private void SetInt(string name, int v) => _gl.Uniform1(Loc(name), v);
     private void SetFloat(string name, float v) => _gl.Uniform1(Loc(name), v);
+    private void SetVec2(string name, float x, float y) => _gl.Uniform2(Loc(name), x, y);
     private void SetVec3(string name, Vector3 v) => _gl.Uniform3(Loc(name), v.X, v.Y, v.Z);
     private void SetVec4(string name, Vector4 v) => _gl.Uniform4(Loc(name), v.X, v.Y, v.Z, v.W);
 
@@ -1271,6 +1566,16 @@ internal sealed unsafe class Renderer : IDisposable
         {
             _gl.DeleteTexture(_jointPaletteTex);
             _gl.DeleteBuffer(_jointTbo);
+        }
+
+        if (_sceneColorTex != 0)
+        {
+            _gl.DeleteTexture(_sceneColorTex);
+        }
+
+        if (_sceneFbo != 0)
+        {
+            _gl.DeleteFramebuffer(_sceneFbo);
         }
 
         _gl.DeleteProgram(_program);

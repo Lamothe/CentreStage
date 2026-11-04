@@ -6,7 +6,7 @@ namespace CentreStage;
 ///   KHR_materials_specular / _ior      - F0 and F90 variation
 ///   KHR_materials_clearcoat            - second GGX lobe at F0 = 0.04
 ///   KHR_materials_sheen                - retro-reflective cloth lobe
-///   KHR_materials_transmission         - refraction tint against the environment colour
+///   KHR_materials_transmission         - screen-space refraction against the opaque scene
 ///   KHR_materials_emissive_strength    - emissive scaling above 1.0
 ///   KHR_materials_pbrSpecularGlossiness- shaded natively (F0 = specular, roughness = 1 - gloss)
 ///   KHR_materials_unlit                - skips lighting entirely
@@ -278,6 +278,10 @@ internal static class ShaderSources
         uniform vec3 uSkyColor;
         uniform vec3 uGroundColor;
 
+        // View matrix, shared with the vertex stage: screen-space refraction needs it to
+        // turn the world-space shading normal into a screen direction.
+        uniform mat4 uView;
+
         // Core metallic-roughness (KHR_materials_pbrSpecularGlossiness maps in too).
         uniform vec4 uBaseColorFactor;
         uniform float uMetallicFactor;
@@ -314,6 +318,15 @@ internal static class ShaderSources
         uniform sampler2D uClearcoatRoughnessTex;
         uniform sampler2D uSheenColorTex;
         uniform sampler2D uSheenRoughnessTex;
+
+        // Screen-space transmission: the colour behind a transmissive fragment, captured
+        // after the opaque pass (see Renderer.CaptureSceneColor).
+        uniform sampler2D uSceneColor;
+        uniform int uHasSceneColor;
+        uniform vec2 uSceneTexel;             // 1 / capture size, in texels
+        uniform vec2 uSceneOrigin;            // viewport origin, for an inset preview
+        uniform float uSceneExtent;           // min(capture width, height), for a square bend
+        uniform float uRefractionScale;       // screen offset, as a fraction of uSceneExtent
 
         uniform int uHasBaseColorTex;
         uniform int uHasMetallicRoughnessTex;
@@ -378,6 +391,16 @@ internal static class ShaderSources
             vec3 lo = c * 12.92;
             vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
             return mix(hi, lo, lessThanEqual(c, vec3(0.0031308)));
+        }
+
+        /// The colour buffer is written through linearToSrgb, so the scene capture is
+        /// sRGB-encoded; transmission mixes it in linear space like every other term.
+        vec3 srgbToLinear(vec3 c)
+        {
+            c = max(c, 0.0);
+            vec3 lo = c / 12.92;
+            vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+            return mix(hi, lo, lessThanEqual(c, vec3(0.04045)));
         }
 
         vec2 uvFor(int set, mat3 transform)
@@ -628,12 +651,31 @@ internal static class ShaderSources
 
             color += ambient * base.rgb * (1.0 - metallic * 0.6);
 
-            // KHR_materials_transmission: what refracts through is approximated as the
-            // environment colour, tinted by the base colour.
+            // KHR_materials_transmission: sample what is actually behind the fragment and
+            // bend it along the normal's screen direction. The old path mixed towards the
+            // sky, which turned any transmissive shell in front of geometry (a cornea over
+            // an eye, a window over a room) into an opaque near-white dome.
+            //
+            // base.rgb is the extension's attenuation tint; a white glass leaves the sample
+            // untouched. uRefractionScale is zero for a head-on normal, which is right:
+            // refraction is strongest where the surface turns away from the viewer.
             if (transmission > 0.0)
             {
-                vec3 refracted = mix(uSkyColor, base.rgb, 0.35);
-                color = mix(color, refracted * base.rgb * 1.4, clamp(transmission, 0.0, 1.0));
+                float t = clamp(transmission, 0.0, 1.0);
+                vec3 behind = uSkyColor;
+                if (uHasSceneColor != 0)
+                {
+                    vec3 nView = normalize(mat3(uView) * n);
+                    // Offset in pixels, not uv: an equal uv offset on a non-square
+                    // viewport bends further across than down and the rim reads as an
+                    // ellipse. uSceneExtent keeps the bend square at any aspect.
+                    vec2 offset = nView.xy * (uRefractionScale * t * uSceneExtent);
+                    vec2 uv = (gl_FragCoord.xy - uSceneOrigin + offset) * uSceneTexel;
+                    behind = srgbToLinear(
+                        textureLod(uSceneColor, clamp(uv, vec2(0.0), vec2(1.0)), 0.0).rgb);
+                }
+
+                color = mix(color, behind * base.rgb, t);
             }
 
             if (uOcclusionStrength > 0.0 && uHasOcclusionTex != 0)

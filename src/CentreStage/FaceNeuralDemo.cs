@@ -127,8 +127,8 @@ internal static class FaceNeuralDemo
                 // UploadTextures consumes the array slots, so the cheap renderer gets the
                 // only clone; the original goes to the full renderer.
                 var cheapDecoded = (StbImageSharp.ImageResult?[])decoded.Clone();
-                fullRenderer = new Renderer(gl, model, decoded, animate: false, cheapScene: false);
-                cheapRenderer = new Renderer(gl, model, cheapDecoded, animate: false, cheapScene: true);
+                fullRenderer = new Renderer(gl, model, decoded, animate: false, cheapScene: false, pinnedEvidence: true);
+                cheapRenderer = new Renderer(gl, model, cheapDecoded, animate: false, cheapScene: true, pinnedEvidence: true);
                 if (fullRenderer.Bounds != cheapRenderer.Bounds)
                 {
                     throw new InvalidOperationException("renderer geometry bounds differ");
@@ -367,7 +367,7 @@ internal static class FaceNeuralDemo
                     var target = sweepSamples >= 2 ? sweepFramebuffer : framebuffer;
                     gl.BindFramebuffer(FramebufferTarget.Framebuffer, target);
                     renderer.DrawCoverage(cam, 1f, lts, skyColour, groundColour,
-                        pose: null, blendMaterialPrefix: "hair");
+                        pose: null, blendMaterialFamily: BlendMaterialFamily.Hair);
                     if (sweepSamples >= 2)
                     {
                         gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, sweepFramebuffer);

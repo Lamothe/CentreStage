@@ -99,52 +99,275 @@ makes it measurably worse**: the hair atlas is genuinely semi-transparent
 samples no card covers reveal the skull. The flag is kept for evaluation, off by
 default.
 
-### Hair opacity (opt-in)
+### Hair opacity
 
-Two levers on the same axis — how much of what is behind a hair card reaches the
-screen. Both are **off by default** and both are verified to leave the current
-path byte-identical (see the numbers below), so the pinned demo frames and the
-PSNRs they print are unaffected.
+The defect this addresses: a hair set is a stack of alpha-painted cards whose
+authored alpha composites to well under one, so the bright skin under the
+parting shows through and the model looks bald from above. Two levers work on
+that axis — how much of what is behind a hair card reaches the screen.
 
-- `CENTRESTAGE_BLEND_CUTOUT=<alpha>` (with `CENTRESTAGE_BLEND_CUTOUT_MATERIAL`,
-  default `hair`) draws fragments of that blend material family at or above the
-  cutoff as **opaque, depth-writing geometry in a prepass** before the sorted
+Both levers match **material families by name**: a comma-separated list
+(`CENTRESTAGE_BLEND_CUTOUT_MATERIAL` / `CENTRESTAGE_BLEND_BOOST_MATERIAL`,
+default `hair,scalp`) is compared against the *tokens* of the material name —
+the name split on non-alphanumeric characters, on lower-to-upper transitions and
+on letter-to-digit transitions — case-insensitively. Tokens rather than raw
+substrings because the boost is on by default: substring matching would also
+catch `Chair_Fabric`, `Mohair_Trim` and `Hairpin` and silently thicken an
+unrelated material. Under-matching leaves a material as it was; over-matching
+alters an asset that never asked for it.
+
+`scalp` is not optional in the default. A hair set names its parts
+independently — `Hair_Transparency`, `BabyHair_Transparency` and
+`Scalp_Transparency`, the painted cap that hides the skin under the parting — so
+matching on `hair` alone drops exactly the part that covers the crown and the
+head still shows through every strand. Measured on `Mégane_Blender.glb`: with
+`hair` alone the crown stays bald; with `hair,scalp` the cap closes it.
+
+- `CENTRESTAGE_BLEND_BOOST=<k>` remaps blend alpha in the shader to
+  `1-(1-a)^k`, folding *k* cards' worth of coverage into each fragment. `k` of 1,
+  or outside `(1, 8]`, disables it (an unusable explicit value is reported on
+  stdout rather than silently restoring the default). Because `pow(1-a, 1)` is
+  not guaranteed to be exactly `1-a`, the shader guards the remap with
+  `uAlphaBoost > 1.0` and never evaluates it when the lever is off. **On by
+  default at k = 3**; set `CENTRESTAGE_BLEND_BOOST=1` for the raw authored alpha.
+- `CENTRESTAGE_BLEND_CUTOUT=<alpha>` draws fragments of the family at or above
+  the cutoff as **opaque, depth-writing geometry in a prepass** before the sorted
   blend pass. Dense strand interiors therefore occlude what is behind them, and
   the genuinely thin remainder still blends in order. Depth de-duplicates: the
   same fragment in the blend pass sits at its own depth, fails `GL_LESS`, and is
-  not composited twice — so no shader variant is involved.
-- `CENTRESTAGE_BLEND_BOOST=<k>` remaps blend alpha in the shader to
-  `1-(1-a)^k`, folding *k* cards' worth of coverage into each fragment, for
-  `CENTRESTAGE_BLEND_BOOST_MATERIAL` (default `hair`). `k` of 1, or outside
-  `(1, 8]`, is ignored. Because `pow(1-a, 1)` is not guaranteed to be exactly
-  `1-a`, the shader guards the remap with `uAlphaBoost > 1.0` and never evaluates
-  it on the default path.
+  not composited twice — so no shader variant is involved. **Off by default**:
+  measured on `Mégane_Blender.glb` it deletes most of the hair, because that
+  atlas is genuinely soft (alpha max 0.86) rather than a dense cutout.
 
-Both levers can be enabled together; the measurement below reports the
+The two levers can be enabled together; the measurement below reports the
 combination as well as each one alone.
 
-`CENTRESTAGE_HIDE_BLEND=<name-prefix>` skips a blend material family entirely. It
+`CENTRESTAGE_HIDE_BLEND=<name-list>` skips a blend material family entirely. It
 is a measurement aid only: it produces the "no hair" reference used to separate
 "the hair is too transparent" from "the hair does not cover that part of the
 head".
 
+The neural demo, its frame dumps and the scene-pair captures are **pinned** to
+the pre-boost path: those renderers are constructed with `pinnedEvidence: true`,
+which keeps `k = 1`. k = 1 is the pre-change shader path, so the locked frames
+and the PSNR inputs are unchanged. Verified by byte-comparing all 46
+full-body/face pair rasters on 04/11/2026; neural inference itself was not re-run.
+The pinned entry points also *reject* `CENTRESTAGE_BLEND_*`
+and the other diagnostics outright, so the variable cannot be used to move a
+locked frame. Live viewing and `--capture` use k = 3.
+
+### Studio lighting and presentation (04/11/2026)
+
+Live viewing and `--capture` now use an asset-independent analytic studio environment:
+a neutral room, broad upper softboxes and a subtle cool fill. Diffuse irradiance
+and roughness-broadened specular radiance come from the same spherical-Gaussian
+lobes; the specular term uses a two-coefficient environment BRDF fit. This is a
+**procedural IBL approximation**, not Sketchfab's HDR cubemap, not an exact GGX
+prefilter and not a BRDF LUT. It requires no external/licensed environment file
+or additional texture units. The supplied LUV binaries were not decoded; their
+orientation/encoding was not guessed. Authored punctual lights remain additive.
+
+Exposure (stops) precedes the existing ACES-like fit, followed by sRGB grading:
+saturation, gamma contrast and a black/white-preserving midtone brightness lift.
+These controls deliberately do **not** claim numerical equivalence with
+Sketchfab's proprietary default tone curve. There is no vignette, sharpen,
+colour-balance, SSAO, SSR or TAA pass yet. Unlit materials retain authored colour.
+The shader variant is constructed separately: the pinned full/cheap sources do
+not acquire the studio functions or grading.
+
+An optional **skin diffusion approximation** matches material-name tokens using
+the same family matcher as hair (default `skin`, so `SkinHead` matches but
+`SkinnyJeans` does not). It softens diffuse lighting normals, broadens the
+environment specular lobe and weakens baked micro-occlusion; it does not blur the
+colour atlas. This is not profile/thickness-based SSS or recovered Sketchfab
+metadata. It cannot reproduce the captured SSS factor 76.1. No ripper or asset
+was changed. Disable or explicitly select families when the name heuristic is
+inappropriate; hair receives no skin treatment by default.
+
+| new variable | default | valid values / meaning |
+|---|---|---|
+| `CENTRESTAGE_PRESENTATION` | 1 | 0 restores the starting hemispheric/tonal path; 1 enables studio |
+| `CENTRESTAGE_ENV_INTENSITY` | 0.8 | [0,16], linear environment multiplier; 0 removes environment lighting |
+| `CENTRESTAGE_ENV_ROTATION` | 0 | [-360,360], yaw degrees around world +Y |
+| `CENTRESTAGE_EXPOSURE` | 0 | [-8,8], exposure stops, +1 doubles pre-map radiance |
+| `CENTRESTAGE_BRIGHTNESS` | 0.04 | [-0.5,0.5], midtone lift `4*b*c*(1-c)` |
+| `CENTRESTAGE_CONTRAST` | -0.12 | [-1,1], display exponent `max(1+c,0.01)` |
+| `CENTRESTAGE_SATURATION` | 0.65 | [0,2], display RGB interpolation from Rec.709 grey |
+| `CENTRESTAGE_SKIN_DIFFUSION` | 0.8 | [0,1], 0 disables skin approximation |
+| `CENTRESTAGE_SKIN_MATERIAL` | skin | comma-separated name tokens; empty disables matching |
+
+Numbers use invariant culture. Invalid/non-finite/out-of-range values warn and
+fall back to the documented default. Startup logs the effective settings.
+All nine variables are rejected (even `PRESENTATION=0`) by the pinned pair
+captures and both neural demos, as are the retained hair controls.
+
+**Measured eye comparison**, sRGB bytes, GLB MD5
+`f79c7958c1a64c02f916f87895862a9d`. Reference is the supplied
+`/home/michael/Downloads/una-sketchfab-reference/compare/sf-render.png`.
+Starting build means the inherited uncommitted tree, including its corrected
+transmission and hair boost, before this presentation work.
+
+| configuration | grey mean | grey sd | HSL saturation | mean RGB |
+|---|---:|---:|---:|---|
+| supplied Sketchfab reference | 0.719813 | 0.062415 | 0.198192 | (0.538788, 0.418891, 0.385368) |
+| supplied earlier Centre Stage reference | 0.650863 | 0.092108 | 0.439307 | (0.424608, 0.246738, 0.189070) |
+| starting build, frozen capture below | 0.649112 | 0.142073 | 0.391703 | (0.438910, 0.280425, 0.217189) |
+| studio defaults, same frozen capture | **0.732927** | **0.129566** | **0.200679** | **(0.547893, 0.453168, 0.411411)** |
+
+Absolute mean-grey error falls 80%, saturation error 99%, Euclidean mean-RGB
+error 82%; sd error falls only 16%. These are aggregate colour statistics,
+**not aligned-image similarity**. The new capture is not precisely registered
+to Sketchfab: more hair/background and a different projection remain. The eye
+is still darker, sclera/lashes and pore contrast harsher, and global sd is still
+2.08 times the reference. The studio is not Urban Exploring Interior; normal
+softening is not spatial SSS. Do not interpret the colour gains as a visual match.
+
+![Sketchfab reference, starting build, studio defaults (left to right)](docs/sketchfab-look-comparison.png)
+
+Reproduce the frozen view (yaw 90 is +Z in this camera, not yaw 0):
+
+```sh
+# Actual solution name is .slnx, not .sln.
+dotnet build CentreStage.slnx
+dotnet test
+CENTRESTAGE_CAMERA="350,16700,775,800,75,0" dotnet run --no-build --project src/CentreStage -- \
+  /home/michael/Downloads/Una-109b3c7b/Una.glb --capture after.png
+CENTRESTAGE_PRESENTATION=0 CENTRESTAGE_CAMERA="350,16700,775,800,75,0" \
+  dotnet run --no-build --project src/CentreStage -- \
+  /home/michael/Downloads/Una-109b3c7b/Una.glb --capture before.png
+# Fixed centre crop: 1280/661 = 1.9365, matching the actual 1036/535 reference
+# (the brief's approximate 1.81 aspect does not describe sf-render.png).
+magick after.png -crop 1280x661+0+69 +repage crop.png
+magick crop.png -colorspace Gray -format "%[fx:mean] %[fx:standard_deviation]\n" info:
+magick crop.png -colorspace HSL -channel G -separate -format "%[fx:mean]\n" info:
+magick crop.png -resize 1x1! -format "%[pixel:p{0,0}]\n" info:
+```
+
+`Gray` here is the output of the supplied ImageMagick conversion, not a claim
+of linear radiometric luminance. RGB uses its supplied resize-to-one command,
+including alpha/filter handling. These are deliberately the same measurement
+conventions as the reference; the mean-grey value must not be inferred from
+the reported resize-to-one RGB tuple.
+
+Single-control ablations, identical frozen camera/crop, all other defaults held:
+
+| override | grey mean | grey sd | HSL saturation |
+|---|---:|---:|---:|
+| defaults | 0.732927 | 0.129566 | 0.200679 |
+| `ENV_INTENSITY=0` | 0.621162 | 0.135482 | 0.206899 |
+| `ENV_ROTATION=90` | 0.738101 | 0.133035 | 0.207219 |
+| `EXPOSURE=1` | 0.805504 | 0.137817 | 0.229715 |
+| `BRIGHTNESS=0` | 0.716726 | 0.126107 | 0.195782 |
+| `CONTRAST=0` | 0.713360 | 0.129297 | 0.206251 |
+| `SATURATION=1` | 0.732440 | 0.129467 | 0.303515 |
+| `SKIN_DIFFUSION=0` | 0.732621 | 0.129573 | 0.200189 |
+
+Names above omit the `CENTRESTAGE_` prefix. Diffusion's aggregate effect is
+small on this framing: the bulk of the measured improvement is the environment
+and grading, not a claim of recovered SSS. No sharpening was added to already
+excessive pore contrast; no extra AO was added to already dark eye recesses.
+
+**Verification:** 202 tests pass (112 baseline, 90 new settings/shader cases),
+zero build warnings/errors. Independent read-only review passed after fixing
+transmission emission, gamma-space compositing, fallback mapping, material F90,
+clearcoat roughness and shared diagnostic rejection. The existing in-progress
+hair boost/token matcher, opaque backdrop transmission fix, emissive diagnostic
+and capture camera override were retained, not reverted.
+The presentation-off PNG is byte-identical to the
+starting binary at this view. All **46 pinned PPM rasters** (24 full-body, 22
+face, including cheap and full) compare byte-identical to the starting build
+on this driver. Both demos and both pair entry points reject 13 tested override
+names (52 subprocess checks) before any GL/inference work; dummy checkpoint
+used only for rejection, never loaded. Neural inference/PSNR was not rerun.
+A second-model Teen Kitty default capture completes without GL errors; this
+is a smoke check, not an independent aesthetic acceptance test.
+`linux/install.sh` completed; a published Release eye capture is byte-identical
+to the verified Debug capture, so the desktop copy is not stale.
+
+Captured transmission in the studio variant composites in display-linear light
+after grading, so the backdrop is not graded twice. Emission on clear glass is
+mapped separately and added to that branch (an explicit approximation). A
+synthetic emissive-glass regression at exposure +8 gives centre RGB (204,48,56)
+versus (29,35,45) without emission; it does not vanish against a saturated
+hypothetical opaque surface. The legacy/failed-capture fallback stays before
+mapping. The retained transmission limits below still apply. Raw local evidence
+and pinned hash comparisons are in ignored `.evidence/sketchfab-look/`.
+
+### Transmission
+
+`KHR_materials_transmission` used to mix towards the sky colour, which made any
+transmissive surface in front of geometry — a cornea over an eye, a window over a
+room — an opaque near-white dome. The extension's own model is that the surface
+does not block what is behind it, so the shader now samples the backdrop.
+
+The opaque pass is split: everything non-transmissive draws first (depth on), the
+colour buffer is copied (blitting, so a multisampled window resolves), then the
+transmissive primitives draw against that copy. The sample is offset along the
+view-space normal's screen direction, which is zero for a head-on surface — a flat
+window is a clean see-through, and the bend is strongest at the rim of a curved
+shell where refraction is strongest in reality — and tinted by `baseColor`, the
+extension's attenuation. The copy is sRGB-encoded, so the shader decodes before
+mixing in linear space; the presentation-off path maps that backdrop a second time. The studio variant
+composites after mapping instead (see above).
+
+Measured on the re-exported `Una.glb`, hair hidden, eye-framed, 1280×800: the
+fraction of the eye band above 170 luma falls from **36.9%** to **0.24%**, and the
+whole frame from 2.9% to 1.3%. With the transmissive primitives removed entirely
+(`CENTRESTAGE_HIDE_TRANSMISSIVE=1`) the band measures luma 115 against the new
+path's 113, so the cornea is now a faithful window rather than a white dome; the
+residual is `baseColor` 0.8 attenuation plus the rim's refraction offset (0.12% of
+pixels, all at the rim). `CENTRESTAGE_LEGACY_TRANSMISSION=1` restores the sky-tint
+path, and on Mégane and the default Una view the two builds are byte-identical
+(neither has transmissive materials visible there; Una's default framing is the
+whole model at 6193 units, where the eyes are far below a pixel).
+
+- `CENTRESTAGE_REFRACTION_SCALE=<n>` sets the screen offset along the normal, as a
+  fraction of the smaller viewport side, in [0, 0.2]. Default 0.02. Zero makes
+  every transmissive surface a flat window; large values distort at the rim of a
+  shell. An unusable explicit value is reported and the default is used.
+- `CENTRESTAGE_LEGACY_TRANSMISSION=1` restores the pre-change sky tint (the
+  diagnostic A/B path).
+- `CENTRESTAGE_HIDE_TRANSMISSIVE=1` skips transmissive primitives altogether, to
+  see what a glass surface is covering.
+
+Known limits: blended geometry behind glass is not in the copy (it draws after,
+in sorted order, and depth-tests against the glass); multiple glass layers do not
+refract each other; a transmissive material in `alphaMode: BLEND` keeps the sky
+tint; there is no IOR bend, so a thick lens magnifies nothing.
+
+`CENTRESTAGE_CAMERA="x,y,z,distance,yawDeg,pitchDeg"` (capture only) aims the
+capture camera at a fixed pose instead of the bounding-box fit, so a detail the
+fit cannot reach — an eye, a fitting — can be compared across builds on exactly
+the same view. It does not affect the viewer or the pinned demo captures.
+
+### Emissive diagnostic
+
+`CENTRESTAGE_NO_EMISSIVE=1` drops every material's emissive term, to separate
+"the glTF says this surface glows" from "the renderer mishandles emissive". An
+exporter that writes `emissiveFactor: [1,1,1]` over a reflection map makes a
+near-black surface render pale; zeroing that factor in the file and setting this
+variable produce the same frame (verified pixel-identical on `Una.glb`, five
+views). Off by default; a correct asset is shaded exactly as before.
+
 Measured on `Teen_Kitty_rigged.glb`, default framing, 1280×800, over the hair
 footprint (15,201 px, defined as wherever a near-opaque render differs from the
-default). Lower mean luma means less of the bright scalp behind the hair is
-reaching the screen:
+pre-boost render). Lower mean luma means less of the bright scalp behind the hair
+is reaching the screen:
 
 | configuration | mean luma | p10 | edge energy |
 |---|---|---|---|
-| default | 42.10 | 24.7 | 8.13 |
+| pre-boost default | 42.10 | 24.7 | 8.13 |
 | cutout 0.5 | 40.12 | 18.3 | — |
 | cutout 0.4 | 39.74 | 17.3 | 10.21 |
-| boost 3 | 39.60 | 17.7 | 10.91 |
+| boost 3 (shipped default) | 39.60 | 17.7 | 10.91 |
 | cutout 0.4 + boost 3 | 39.55 | 18.0 | 10.03 |
 | boost 8 (near-opaque reference) | 39.12 | 15.0 | 12.09 |
 
-The combination lands within 0.43 luma levels of the near-opaque reference, so it
+`boost 3` lands within 0.48 luma levels of the near-opaque reference, so it
 removes essentially all of the transparency bleed, and edge energy *rises*
-(8.13 → 10.03): the strands gain contrast, they are not flattened into a mask.
+(8.13 → 10.91): the strands gain contrast, they are not flattened into a mask.
+The combination buys a further 0.05 luma levels for the cost of the extra
+opaque prepass, which is why only the boost is on by default.
 
 Scope, measured rather than assumed: in the scalp band above the face only
 **6.6%** of the bright surface is uncovered by any hair fragment, so transparency
@@ -152,6 +375,18 @@ is the dominant mechanism here and an alpha-space fix is the right lever. (An
 earlier pass over the whole head reported 40%; that mask included the face, where
 of course no hair is drawn — the 6.6% figure is the one that applies.) Unverified
 at other orbit angles: the 12-yaw sweep was not re-run for this change.
+
+The table and the coverage figure above were measured with
+`CENTRESTAGE_BLEND_BOOST=1` and the old prefix mask (`hair*`), which is not the
+mask the shipped default now uses (`hair,scalp` over name tokens). They compare
+levers against each other, which is what they were for; they are not a
+measurement of the current default's absolute numbers.
+
+Re-measuring them needs the face checkpoint, `CENTRESTAGE_FACE_SWEEP=<n>` and a
+dump directory, with `CENTRESTAGE_HAIR_COVERAGE=1` for the coverage maps; the
+sweep's renderers are already pinned to k = 1. The checkpoint is not on this host,
+so these numbers are historical rather than re-runnable here, and the sweep was
+not re-run for this change.
 
 ## Desktop integration (GNOME) — open from Files
 
@@ -416,7 +651,14 @@ Exhibit-failing `pbrSpecularGlossiness` and `texture_transform`-required files),
 21 unit tests over the parser maths.
 
 Not yet: animation playback (structure is parsed), morph targets, KHR_materials_variants,
-refraction-through-transmission (approximated against the environment colour), image-based
-lighting (hemispheric ambient + key light stands in for a prefiltered probe). Blended
-(`alphaMode: BLEND`) materials render in a second pass with standard alpha blending;
-per-pixel sorting within a mesh is not done.
+image-based lighting (hemispheric ambient + key light stands in for a prefiltered probe).
+Blended (`alphaMode: BLEND`) materials render in a second pass with standard alpha
+blending; per-pixel sorting within a mesh is not done.
+
+`KHR_materials_transmission` is a screen-space approximation, not a second scene pass:
+opaque transmissive primitives are drawn after the rest of the opaque geometry and sample
+a colour copy of it at an offset along the surface normal, tinted by the base colour (see
+*Transmission* above). It reads the true backdrop, so a cornea over an eye or a window over
+a room shows what is behind it; it does not bend light by IOR, accumulate multiple glass
+layers, or capture blended geometry behind glass. Transmissive materials whose `alphaMode`
+is `BLEND` keep the older sky-tint approximation.

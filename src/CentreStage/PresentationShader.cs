@@ -48,11 +48,19 @@ internal static class PresentationShader
             // Surface diffusion broadens the dielectric lobe without blurring the atlas.
             float environmentRoughness = mix(roughness, max(roughness, 0.55), uSkinDiffusion);
             vec3 environmentNormal = normalize(mix(n, normalize(vNormal), uSkinDiffusion * 0.5));
+            // Horizon specular occlusion: a normal-map reflection below the mesh
+            // surface cannot see the environment. Avoid false mirror seams at steep pores.
+            vec3 surfaceNormal = normalize(vNormal);
+            if (dot(surfaceNormal, v) < 0.0) { surfaceNormal = -surfaceNormal; }
+            vec3 reflected = reflect(-v, environmentNormal);
+            float horizon = min(1.0 + dot(reflected, surfaceNormal), 1.0);
+            horizon = max(horizon, 0.0);
+            horizon *= horizon;
             vec2 brdf = studioBrdf(NoV, environmentRoughness);
             vec3 envFresnel = f0 + (vec3(f90) - f0) * pow(1.0 - NoV, 5.0);
             color += ambient * base.rgb * (1.0 - metallic) * (1.0 - envFresnel);
             color += studioSpecular(environmentDirection(reflect(-v, environmentNormal)), environmentRoughness)
-                * uEnvironmentIntensity * (f0 * brdf.x + f90 * brdf.y);
+                * uEnvironmentIntensity * (f0 * brdf.x + f90 * brdf.y) * horizon;
             // Clearcoat has its own dielectric environment lobe, above the base surface.
             float coatRoughness = clamp(uClearcoatRoughnessFactor, 0.04, 1.0);
             if (uHasClearcoatRoughnessTex != 0)

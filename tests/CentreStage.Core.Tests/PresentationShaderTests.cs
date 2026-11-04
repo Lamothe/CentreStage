@@ -3,6 +3,16 @@ namespace CentreStage.Core.Tests;
 public class PresentationShaderTests
 {
     [Fact]
+    public void StudioOccludesEnvironmentReflectionsBelowTheMeshHorizon()
+    {
+        Assert.Contains("dot(reflected, surfaceNormal)", PresentationShader.Fragment);
+        Assert.Contains("horizon *= horizon", PresentationShader.Fragment);
+        Assert.Contains("brdf.y) * horizon", PresentationShader.Fragment);
+        Assert.DoesNotContain("float horizon", ShaderSources.Fragment);
+        Assert.DoesNotContain("float horizon", ShaderSources.CheapFragment);
+    }
+
+    [Fact]
     public void LiveVariantBuildsWithOneMainAndVersion()
     {
         var shader = PresentationShader.Fragment;

@@ -426,6 +426,61 @@ Release capture is byte-identical to the verified Debug capture.
 Raw isolations, including no-shell/no-bend/no-diffusion captures, are in ignored
 `.evidence/una-local-defects/`.
 
+### Nose fringe and ribbon hair audit (04/11/2026)
+
+A front close-up (`CENTRESTAGE_CAMERA="0,16500,775,900,90,0"`, 1280×800)
+confirms the blue-grey nose fringe is primarily a **specular lighting response**,
+not a second skin layer: a diagnostic build with environment specular removed
+eliminates that fringe and turns the white hair cards dark. That build was not
+shipped, because it removes legitimate reflections everywhere. A geometric-normal
+Fresnel experiment was also discarded because it suppresses normal-map response.
+
+The live studio shader now applies smooth **horizon specular occlusion**:
+`clamp(1 + dot(reflect(-view, shadingNormal), visibleMeshNormal), 0, 1)^2`.
+Normal-map reflections directed below the visible mesh surface are attenuated
+rather than receiving unoccluded room lighting. This is a general visibility
+approximation, not a material-name workaround. It affects only the base
+environment-specular lobe; clearcoat and pinned shaders are unchanged. No new
+settings were added. **The nose fringe remains visible**: this small correction
+must not be described as a complete solution. Its fixed lower-nose patch
+`170x65+555+680` grey mean/sd changes 0.693784/0.018220 to 0.690320/0.026921;
+these quantify change, not improvement against an aligned reference.
+
+![Before / horizon occlusion, same front camera](docs/una-nose-horizon.png)
+
+**The hair cards have a verified export defect**, overturning the earlier
+assumption that the downloaded GLB's hair was fully correct:
+
+| measured texture property | value |
+|---|---:|
+| embedded Hair base-colour texture alpha min / max / mean | 1 / 1 / 1 |
+| companion `textures/Hair.png` RGB | all zero |
+| companion `textures/Hair.png` alpha mean / sd | 0.0606581 / 0.134522 |
+
+The separate source image carries strand opacity in its **alpha**, not its RGB.
+The GLB's `Hair` material has `BLEND` and factor alpha 1 but its embedded colour
+texture is opaque everywhere, so the viewer receives whole ribbon geometry.
+No amount of alpha boosting, sorting or cutout threshold can recover absent
+strand alpha. In addition, Sketchfab uses hair specular factor 0.0078125 plus a
+texture; the GLB omits that extension and receives glTF's default dielectric
+specular. That explains part of its pale reflective appearance. The wrongly
+enabled hair normal map noted above further changes response. These are distinct
+from the black diffuse factor, which is already correct.
+
+The original GLB remains untouched (MD5
+`f79c7958c1a64c02f916f87895862a9d`). No per-asset renderer hack, filename-based
+texture substitution, silent asset rewrite or re-rip was introduced. Faithful
+strand width requires an explicitly corrected asset/export carrying the source
+opacity; stronger diffuse darkening alone would merely make black ribbons.
+
+Verification: **218 tests passed**, zero build warnings/errors; **46 pinned
+PPM rasters byte-identical** to the prior build. Independent read-only review
+found no blockers, while noting that numerical/backface rendering is not covered
+by the source-structure test and that clearcoat occlusion remains separate.
+Raw isolations and embedded texture extracts are in ignored
+`.evidence/una-hair-nose/`. Hair shape/colour and the remaining nose fringe are
+**not resolved** in this change.
+
 ### Transmission
 
 `KHR_materials_transmission` used to mix towards the sky colour, which made any

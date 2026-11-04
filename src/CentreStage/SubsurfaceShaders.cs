@@ -58,6 +58,7 @@ internal static class SubsurfaceShaders
     internal static readonly string Combine = Common + """
         uniform sampler2D radianceMap;
         uniform sampler2D originalDiffuse;
+        uniform sampler2D albedoMap;
         uniform float strength;
         uniform float exposure;
         uniform float brightness;
@@ -75,7 +76,8 @@ internal static class SubsurfaceShaders
             if (original.a < 0.0) { result = vec4(radiance, 1.0); return; }
             vec3 softened = texture(source, uv).rgb;
             // Preserve all non-diffuse radiance, including specular microdetail and emission.
-            vec3 c = max(radiance + (softened - original.rgb) * strength * original.a, 0.0);
+            vec3 detail = texture(albedoMap, uv).rgb;
+            vec3 c = max(radiance + (softened - original.rgb) * detail * strength * original.a, 0.0);
             c *= exp2(exposure);
             c = (c * (2.51*c + 0.03)) / (c * (2.43*c + 0.59) + 0.14);
             c = linearToSrgb(c);

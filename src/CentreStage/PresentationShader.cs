@@ -22,6 +22,7 @@ internal static class PresentationShader
     {
         var source = Replace(ShaderSources.Fragment, "#version 330 core", "#version 330 core\n" + StudioEnvironment.Glsl + "\n" + """
             layout(location = 1) out vec4 DiffuseOutput;
+            layout(location = 2) out vec4 AlbedoOutput;
             uniform bool uSssCapture;
             uniform float uSssMaterial;
             uniform float uEnvironmentIntensity;
@@ -171,13 +172,18 @@ internal static class PresentationShader
             if (uSssCapture)
             {
                 FragColor = vec4(color, base.a);
-                DiffuseOutput = vec4(sssDiffuse, uSssMaterial);
+                // Split albedo symmetrically: some colour diffuses, the local
+                // square-root colour restores high-frequency authored detail.
+                vec3 detail = sqrt(clamp(base.rgb, 0.0, 1.0));
+                AlbedoOutput = vec4(detail, 1.0);
+                DiffuseOutput = vec4(sssDiffuse / max(detail, vec3(0.001)), uSssMaterial);
                 return;
             }
             color = presentationMap(color);
             """);
         source = Replace(source, "FragColor = vec4(authored, base.a);", """
             DiffuseOutput = vec4(0.0, 0.0, 0.0, -1.0);
+            AlbedoOutput = vec4(0.0);
             FragColor = vec4(authored, base.a);
             """);
         return source;

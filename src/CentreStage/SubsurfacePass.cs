@@ -11,7 +11,7 @@ internal sealed unsafe class SubsurfacePass : IDisposable
     private readonly uint _blur;
     private readonly uint _combine;
     private readonly uint _vao;
-    private readonly uint[] _textures = new uint[5];
+    private readonly uint[] _textures = new uint[6];
     private readonly uint[] _fbos = new uint[3];
     private readonly int[] _viewport = new int[4];
     private int _destination;
@@ -40,12 +40,14 @@ internal sealed unsafe class SubsurfacePass : IDisposable
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _fbos[0]);
         _gl.Viewport(0, 0, (uint)_width, (uint)_height);
         _gl.Clear(ClearBufferMask.DepthBufferBit);
-        var buffers = stackalloc DrawBufferMode[] { DrawBufferMode.ColorAttachment0, DrawBufferMode.ColorAttachment1 };
-        _gl.DrawBuffers(2, buffers);
+        var buffers = stackalloc DrawBufferMode[] { DrawBufferMode.ColorAttachment0, DrawBufferMode.ColorAttachment1, DrawBufferMode.ColorAttachment2 };
+        _gl.DrawBuffers(3, buffers);
         var zero = stackalloc float[4];
         for (var i = 0; i < 4; i++) { zero[i] = 0; }
         zero[3] = -2f;
         _gl.ClearBuffer(BufferKind.Color, 1, zero);
+        zero[3] = 0f;
+        _gl.ClearBuffer(BufferKind.Color, 2, zero);
     }
 
     public void Resolve(OrbitCamera camera, PresentationSettings settings, float modelExtent)
@@ -79,6 +81,7 @@ internal sealed unsafe class SubsurfacePass : IDisposable
         Bind(_combine, "radianceMap", 1, _textures[0]);
         Bind(_combine, "originalDiffuse", 2, _textures[1]);
         Bind(_combine, "depthMap", 3, _textures[2]);
+        Bind(_combine, "albedoMap", 4, _textures[5]);
         foreach (var (name, value) in new[] { ("strength", settings.SubsurfaceScattering), ("exposure", settings.Exposure),
             ("brightness", settings.Brightness), ("contrast", settings.Contrast), ("saturation", settings.Saturation) })
         {
@@ -120,6 +123,7 @@ internal sealed unsafe class SubsurfacePass : IDisposable
             if (i == 0)
             {
                 _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment1, TextureTarget.Texture2D, _textures[1], 0);
+                _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment2, TextureTarget.Texture2D, _textures[5], 0);
                 _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, TextureTarget.Texture2D, _textures[2], 0);
             }
             if (_gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer) != GLEnum.FramebufferComplete)

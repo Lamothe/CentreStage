@@ -501,8 +501,9 @@ applies two depth/mask-aware 17-tap RGB diffusion passes, then recombines
 Reflections, emission, transparent hair and glass are not blurred. Background and
 unlit materials bypass grading unchanged. Glass/hair draw after the resolve and
 depth transfer. The RGB kernel carries red farther than blue. This is a general
-skin approximation, **not** Una's authored Sketchfab SSS profile; currently it
-blurs lit diffuse colour rather than factoring/reapplying albedo separately.
+skin approximation, **not** Una's authored Sketchfab SSS profile; it
+splits square-root albedo between diffusion and local recombination to retain
+authored colour detail (updated in the follow-up below).
 
 Sketchfab's viewer source inspected at the supplied model URL contains
 `sssCommon.glsl` checkerboard separation/reconstruction, `sssBlur.glsl` jittered
@@ -557,6 +558,45 @@ Automation adds `appearance`, `appearance down x y`, `appearance move x y` and
 `appearance up` to the instance FIFO (logical-window coordinates), routed to the
 same panel methods as pointer input. `CENTRESTAGE_CAMERA` now also sets the
 initial interactive view, using the capture parser.
+
+### Scattering detail preservation follow-up (04/11/2026)
+
+The scattering pass now captures an additional HDR attachment containing
+`sqrt(clamp(baseColour, 0, 1))`. It filters diffuse radiance divided by that
+factor, and reapplies the local factor to the correction. This lets some colour
+travel with light while retaining sharper atlas detail; there is no noise overlay
+or new setting. It is still an approximation, not a recovered Sketchfab profile.
+Black texels stay black in the diffuse component and constant fields are conserved;
+specular and emission are untouched. The additional RGBA16F attachment costs
+8 bytes/pixel (about 8.2 MB at 1280×800), only allocated when scattering is used.
+
+A synthetic flat-normal two-colour skin texture, no specular, scattering strength
+1/radius 0.01, measures the boundary directly. Values below are 8-bit display RGB,
+not linear radiance; x639 is the dark side and x640 the light side at y400:
+
+| setting | x639 RGB | x640 RGB | green-channel edge step |
+|---|---|---|---:|
+| off | (147,60,61) | (209,192,174) | 132 |
+| previous diffuse blur | (181,136,116) | (194,169,154) | 33 |
+| local albedo restoration | (161,86,79) | (200,176,160) | 90 |
+
+This demonstrates reduced colour bleeding, **not** a proven closer Sketchfab
+match. Una's frozen lip patch (same camera/crop as above) changes only slightly:
+
+| scattering strength 0.65 | grey mean | grey sd |
+|---|---:|---:|
+| previous | 0.660344 | 0.023605 |
+| local albedo restoration | 0.660325 | 0.023613 |
+
+![Previous scattering / local albedo restoration](docs/una-scattering-detail.png)
+
+The pale specular seam remains and requires separate specular/material work.
+Default-off Una capture and unlit/background fixture remain byte-identical;
+46 pinned rasters remain identical. **264 tests pass**, including black/near-black
+colour, constant-field conservation and boundary-detail checks. Single-sample and
+4× MSAA scattering captures report zero GL errors. Independent review passed.
+Evidence and synthetic GLB: `.evidence/una-sss-detail/`. No new environment
+variables, default changes, asset edits or changes to pinned shader source.
 
 ### Lip filtering and real HDR reflection diagnostics (04/11/2026)
 

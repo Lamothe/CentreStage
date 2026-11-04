@@ -14,7 +14,8 @@ public class SubsurfaceTests
         var capture = shader.IndexOf("if (uSssCapture)", StringComparison.Ordinal);
         var map = shader.IndexOf("color = presentationMap(color);", StringComparison.Ordinal);
         Assert.True(capture > 0 && capture < map);
-        Assert.Contains("DiffuseOutput = vec4(sssDiffuse, uSssMaterial)", shader);
+        Assert.Contains("DiffuseOutput = vec4(sssDiffuse / max(detail, vec3(0.001)), uSssMaterial)", shader);
+        Assert.Contains("vec3 detail = sqrt(clamp(base.rgb, 0.0, 1.0))", shader);
         Assert.Contains("DiffuseOutput = vec4(0.0, 0.0, 0.0, -1.0)", shader);
         Assert.DoesNotContain("uSssCapture", ShaderSources.Fragment);
     }
@@ -22,12 +23,43 @@ public class SubsurfaceTests
     [Fact]
     public void RecombinationPreservesNonDiffuseAndUnlitOutputAndTransfersDepth()
     {
-        Assert.Contains("radiance + (softened - original.rgb) * strength * original.a", SubsurfaceShaders.Combine);
+        Assert.Contains("radiance + (softened - original.rgb) * detail * strength * original.a", SubsurfaceShaders.Combine);
         Assert.Contains("if (original.a < 0.0) { result = vec4(radiance, 1.0); return; }", SubsurfaceShaders.Combine);
         Assert.Contains("gl_FragDepth = texture(depthMap, uv).r", SubsurfaceShaders.Combine);
         Assert.Contains("texture(maskMap", SubsurfaceShaders.Blur);
         Assert.Contains("smoothstep(radiusWorld * 0.25, radiusWorld, dz)", SubsurfaceShaders.Blur);
         Assert.DoesNotContain("rand", SubsurfaceShaders.Blur);
+    }
+
+    [Theory]
+    [InlineData(0f)]
+    [InlineData(0.0000001f)]
+    [InlineData(0.04f)]
+    [InlineData(1f)]
+    public void AlbedoFactoringPreservesConstantLightingAndNonDiffuseRadiance(float albedo)
+    {
+        var detail = MathF.Sqrt(Math.Clamp(albedo, 0f, 1f));
+        var diffuse = albedo * 3f;
+        var factored = diffuse / MathF.Max(detail, 0.001f);
+        var specular = 2f;
+        var result = diffuse + specular + (factored - factored) * detail;
+        Assert.True(float.IsFinite(factored));
+        Assert.Equal(diffuse + specular, result);
+        if (albedo == 0f)
+        {
+            // Neighbouring red light cannot paint over an authored black texel.
+            Assert.Equal(specular, diffuse + specular + (10f - factored) * detail);
+        }
+    }
+
+    [Fact]
+    public void LocalColourRestorationReducesSharpAlbedoBoundaryBleed()
+    {
+        const float dark = 0.04f;
+        const float light = 0.64f;
+        var old = (dark + light) / 2f;
+        var restored = (MathF.Sqrt(dark) + MathF.Sqrt(light)) / 2f * MathF.Sqrt(dark);
+        Assert.True(restored > dark && restored < old);
     }
 
     [Fact]

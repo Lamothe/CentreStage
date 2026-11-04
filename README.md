@@ -598,6 +598,80 @@ colour, constant-field conservation and boundary-detail checks. Single-sample an
 Evidence and synthetic GLB: `.evidence/una-sss-detail/`. No new environment
 variables, default changes, asset edits or changes to pinned shader source.
 
+### Rose/Una: material restoration and grazing film (04/11/2026)
+
+The comparison exposed independent issues, not a need for cosmetic noise:
+
+* Rose's skin is `Head_Material`, not a skin token. Default eligible families are
+  now `skin,head,face,body`; matching remains token-based and is heuristic, not
+  anatomical classification. `CENTRESTAGE_SKIN_MATERIAL` still overrides it.
+  SSS remains off by default. Its toggle previously did nothing on Rose's head.
+* Live environment diffuse was multiplied by mirror Schlick Fresnel at grazing
+  angles, removing nearly all diffuse light even on a rough dielectric. It now
+  uses the integrated reflectance of the same split-sum specular lobe. For
+  roughness 0.52/F0 0.04/NoV 0.05, the diffuse multiplier is **0.8603** rather
+  than **0.2172**. This fixes that energy-partition error; it does not prove every
+  remaining side-view shading defect is gone. Spec-gloss also respects explicitly
+  zero reflectance and preserves normal-incidence F0 in the direct-light branch.
+* Live PNG blending accumulated alpha squared, leaving translucent output pixels
+  over an opaque background. Image viewers composited those a second time, making
+  dark hair/eyebrows look pale. Live blending now preserves opaque backdrop alpha;
+  final Una and Rose captures have minimum alpha **1**. Pinned blending is unchanged.
+* Una's GLB hair atlas has mean alpha **1.000000**. The already-downloaded authored
+  `Hair.png` has mean alpha **0.060658**; packing it yields real strand gaps.
+  The correction also restores disabled hair normals and weak source specular
+  response. This is asset restoration, not a renderer-only ribbon-width trick.
+* Rose's MeniscusEye export has metallic 1, tint from an unrelated preview and
+  missing IOR/specular settings. Source settings say white refraction tint, IOR 1
+  and a separate specular map/factor. Correcting the material removes the black
+  eye surround. Normal strengths and source specular maps are restored generally.
+
+![Una: original / restored materials and renderer fixes](docs/una-material-correction.png)
+![Rose: original / restored materials and renderer fixes](docs/rose-material-correction.png)
+
+Original downloads are untouched (Una MD5 `f79c7958c1a64c02f916f87895862a9d`, Rose
+`f4407ff205b93c21c20b4e80322bc855`). **Open the corrected copies to see the asset
+fixes**; opening the old GLB cannot recover missing opacity/specular information:
+
+```
+.evidence/rose-investigation/Una-corrected.glb
+.evidence/rose-investigation/Rose-corrected.glb
+```
+
+These local evidence assets are intentionally not committed. Restoration is
+reproducible with an offline, exclusive-output tool (requires Node + ImageMagick):
+
+```
+node scripts/restore-sketchfab-materials.mjs input.glb options.json textures.json NEW-output.glb
+node --test scripts/restore-sketchfab-materials.test.mjs
+```
+
+Supply Sketchfab's explicit model `/options` and `/textures` JSON plus the existing
+`textures/` directory beside the input. The tool does not fetch anything or overwrite
+files. It validates material names and identity UVs; it restores enabled normal
+channels/green orientation/strength, RGB diffuse factors, ALPHA opacity packed at
+its source resolution, source RGB specular-glossiness and refraction IOR/tint.
+Non-default UV transforms and unsupported enabled roughness/gloss textures fail
+rather than guess. Output logs list changes. Additive cornea remains an explicitly
+reported alpha-blend approximation. glTF SG is used to retain the source specular
+workflow, not claimed equivalent to Sketchfab's complete BRDF. No model re-rip.
+
+The optional SSS remains the previous stable screen-space approximation, not
+Sketchfab's temporal/dithered pipeline. No stronger fake-noise overlay was added.
+SSS thickness/profile maps, cavity, exact environment/tone curve, shadows and
+additive blending still differ. Pore shading remains more pronounced at close
+range; this work does **not** establish a visual match to the supplied screenshot.
+
+Verification: **274 .NET tests**, **3 Node/ImageMagick tests**, zero build warnings
+or GL errors in both models' front/side captures and Rose's 4× MSAA SSS close-up;
+**46 pinned rasters byte-identical**. Tests cover grazing energy, zero/low/ordinary
+reflectance, Rose family matching, opacity-only materials, RGB-alpha isolation,
+textured refraction tint and overwrite refusal. Independent review passed after
+fixing its findings. Evidence: `.evidence/rose-investigation/`. All comparison
+captures use identical per-model cameras; old PNGs are flattened onto the same
+dark background for documentation, to avoid the previous incorrect stored alpha
+misleading the image comparison. No registered pixel match to Sketchfab claimed.
+
 ### Lip filtering and real HDR reflection diagnostics (04/11/2026)
 
 The extreme lip comparison is **not matched**. Tracing the supplied scene gives

@@ -20,7 +20,7 @@ public sealed record PresentationSettings
     public float SubsurfaceScattering { get; init; } = 0f;
     public float SubsurfaceRadius { get; init; } = 0.002f;
     public float SkinDiffusion { get; init; } = 0f;
-    public string SkinFamilies { get; init; } = "skin";
+    public string SkinFamilies { get; init; } = "skin,head,face,body";
 
     /// <summary>Do not invent a screen-space optical distance for live glass.
     /// The legacy offset is retained for pinned evidence.</summary>

@@ -50,7 +50,7 @@ public class PresentationSettingsTests
         Assert.Equal(-0.12f, settings.Contrast);
         Assert.Equal(0.73f, settings.Saturation);
         Assert.Equal(0f, settings.SkinDiffusion);
-        Assert.Equal("skin", settings.SkinFamilies);
+        Assert.Equal("skin,head,face,body", settings.SkinFamilies);
     }
 
     [Theory]
@@ -168,6 +168,10 @@ public class PresentationSettingsTests
     }
 
     [Theory]
+    [InlineData("Head_Material", true)]
+    [InlineData("Face_Material", true)]
+    [InlineData("Body", true)]
+    [InlineData("Headlight", false)]
     [InlineData("SkinHead", true)]
     [InlineData("Std_Skin_Head", true)]
     [InlineData("skin", true)]

@@ -55,6 +55,15 @@ internal static class PresentationShader
                 return vec3(c*d.x - s*d.z, d.y, s*d.x + c*d.z);
             }
             """);
+        source = Replace(source, "f0 = specular;", """
+            f0 = specular;
+            // Spec-gloss can author zero reflectance (eyelashes/hair). The
+            // glTF SG reference uses reflectance-dependent grazing Fresnel;
+            // forcing F90=1 adds a bright film even when F0 is explicitly zero.
+            f90 = clamp(max(max(f0.r, f0.g), f0.b) * 50.0, 0.0, 1.0);
+            """);
+        source = Replace(source, "vec3 fresnel = fresnelSchlick(VoH, f0) * f90;",
+            "vec3 fresnel = f0 + (vec3(f90) - f0) * pow(clamp(1.0 - VoH, 0.0, 1.0), 5.0);");
         // Defer alpha masking until derivatives have been evaluated for the whole quad.
         source = Replace(source, "if (uAlphaMode == 1 && base.a < uAlphaCutoff)", "if (uUnlit && uAlphaMode == 1 && base.a < uAlphaCutoff)");
         source = Replace(source, "float transmission = uTransmissionFactor;", """
@@ -96,7 +105,10 @@ internal static class PresentationShader
             horizon = max(horizon, 0.0);
             horizon *= horizon;
             vec2 brdf = studioBrdf(NoV, environmentRoughness);
-            vec3 envFresnel = f0 + (vec3(f90) - f0) * pow(1.0 - NoV, 5.0);
+            // Use the same integrated rough-surface reflectance as the specular
+            // lobe. Mirror Fresnel tends to one at grazing and incorrectly
+            // removes all diffuse light even from a rough dielectric.
+            vec3 envFresnel = clamp(f0 * brdf.x + f90 * brdf.y, 0.0, 1.0);
             color += ambient * base.rgb * (1.0 - metallic) * (1.0 - envFresnel);
             color += environmentSpecular(environmentDirection(reflect(-v, environmentNormal)), environmentRoughness)
                 * uEnvironmentIntensity * (f0 * brdf.x + f90 * brdf.y) * horizon;

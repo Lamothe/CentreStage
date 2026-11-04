@@ -1136,7 +1136,17 @@ internal sealed unsafe class Renderer : IDisposable
                 }
                 else
                 {
-                    _gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+                    if (_pinnedEvidence)
+                    {
+                        _gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+                    }
+                    else
+                    {
+                        // The backdrop is already opaque. Accumulate coverage, not
+                        // alpha squared: PNG viewers must not composite it twice.
+                        _gl.BlendFuncSeparate(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha,
+                            BlendingFactor.One, BlendingFactor.OneMinusSrcAlpha);
+                    }
                 }
                 _gl.DepthMask(false);
                 if (msaa)
